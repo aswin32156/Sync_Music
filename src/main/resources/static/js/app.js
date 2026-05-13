@@ -750,7 +750,12 @@ function updateNowPlaying(song, playbackState) {
             // Load audio for the current song — only if song changed
             if (song && song.audioUrl && audioPlayer.getAttribute('data-song-id') !== song.id) {
                 audioPlayer.setAttribute('data-song-id', song.id);
-                audioPlayer.src = song.audioUrl;
+                // Use server-side proxy for JioSaavn audio to avoid CORS and preview-link issues
+                if (song.id && song.id.startsWith('jio_')) {
+                    audioPlayer.src = '/api/music/stream/' + encodeURIComponent(song.id);
+                } else {
+                    audioPlayer.src = song.audioUrl;
+                }
                 audioPlayer.load();
 
                 isPlaying = playbackState.playing;
