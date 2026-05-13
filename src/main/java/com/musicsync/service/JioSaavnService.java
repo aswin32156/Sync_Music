@@ -103,7 +103,14 @@ public class JioSaavnService {
             }
             String audioUrl = null;
             if (obj.has("more_info")) {
-                audioUrl = getField(obj.getAsJsonObject("more_info"), "vlink");
+                JsonObject moreInfo = obj.getAsJsonObject("more_info");
+                audioUrl = getField(moreInfo, "preview_url");
+                if (audioUrl == null || audioUrl.isEmpty()) {
+                    audioUrl = getField(moreInfo, "vlink");
+                }
+                if (audioUrl == null || audioUrl.isEmpty()) {
+                    audioUrl = getField(moreInfo, "media_preview_url");
+                }
             }
             if (audioUrl == null || audioUrl.isEmpty()) audioUrl = "jio_" + id;
             return new Song("jio_" + id, title, artist, album, image, duration, audioUrl);

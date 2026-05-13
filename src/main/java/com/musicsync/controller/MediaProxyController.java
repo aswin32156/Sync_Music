@@ -3,12 +3,11 @@ package com.musicsync.controller;
 import java.io.InputStream;
 import java.io.OutputStream;
 
-import javax.servlet.http.HttpServletResponse;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.client.ClientHttpResponse;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
+import org.springframework.http.HttpMethod;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RestController;
@@ -16,18 +15,23 @@ import org.springframework.web.client.RequestCallback;
 import org.springframework.web.client.ResponseExtractor;
 import org.springframework.web.client.RestTemplate;
 
+import jakarta.servlet.http.HttpServletResponse;
+
 import com.musicsync.model.Song;
 import com.musicsync.service.MusicService;
+import com.musicsync.service.JioSaavnService;
 
 @RestController
 public class MediaProxyController {
     private static final Logger log = LoggerFactory.getLogger(MediaProxyController.class);
 
     private final MusicService musicService;
+    private final JioSaavnService jioSaavnService;
     private final RestTemplate restTemplate;
 
-    public MediaProxyController(MusicService musicService) {
+    public MediaProxyController(MusicService musicService, JioSaavnService jioSaavnService) {
         this.musicService = musicService;
+        this.jioSaavnService = jioSaavnService;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(5000);
         factory.setReadTimeout(20000);
@@ -43,12 +47,23 @@ public class MediaProxyController {
             }
 
             Song song = musicService.getSongById(songId);
-            if (song == null || song.getAudioUrl() == null || song.getAudioUrl().isBlank()) {
+            if (song == null) {
                 response.sendError(HttpServletResponse.SC_NOT_FOUND);
                 return;
             }
 
-            final String remoteUrl = song.getAudioUrl();
+            String remoteUrl = song.getAudioUrl();
+            if (songId.startsWith("jio_") && (remoteUrl == null || remoteUrl.isBlank() || remoteUrl.startsWith("jio_"))) {
+                Song resolved = jioSaavnService.getSongById(songId.substring(4));
+                if (resolved != null && resolved.getAudioUrl() != null && !resolved.getAudioUrl().isBlank()) {
+                    remoteUrl = resolved.getAudioUrl();
+                }
+            }
+
+            if (remoteUrl == null || remoteUrl.isBlank() || remoteUrl.startsWith("jio_")) {
+                response.sendError(HttpServletResponse.SC_NOT_FOUND);
+                return;
+            }
 
             // Stream remote response directly to client
             RequestCallback requestCallback = clientHttpRequest -> {};
@@ -72,7 +87,7 @@ public class MediaProxyController {
                 return null;
             };
 
-            restTemplate.execute(remoteUrl, org.springframework.http.HttpMethod.GET, requestCallback, responseExtractor);
+            restTemplate.execute(remoteUrl, HttpMethod.GET, requestCallback, responseExtractor);
 
         } catch (Exception e) {
             log.error("Failed to stream song {}: {}", songId, e.getMessage());
