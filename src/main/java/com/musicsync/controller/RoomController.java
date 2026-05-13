@@ -118,11 +118,13 @@ public class RoomController {
     @GetMapping({"/music/search/external", "/music/searchExternal"})
     public ResponseEntity<List<Song>> searchExternal(
             @RequestParam(name = "q", defaultValue = "") String q,
+            @RequestParam(name = "query", defaultValue = "") String query,
             @RequestParam(name = "limit", defaultValue = "200") int limit) {
-        if (q.isBlank()) {
+        String searchTerm = !q.isBlank() ? q : query;
+        if (searchTerm.isBlank()) {
             return ResponseEntity.ok(List.of());
         }
-        return ResponseEntity.ok(musicService.searchExternal(q, Math.min(limit, 300)));
+        return ResponseEntity.ok(musicService.searchExternal(searchTerm, Math.min(limit, 300)));
     }
 
     @GetMapping("/music/sources")

@@ -4,7 +4,7 @@ services:
     runtime: docker
     plan: free
     region: oregon
-    branch: master
+    branch: fix/jiosaavn-query-param
     dockerfilePath: ./Dockerfile
     envVars:
       - key: JAVA_OPTS
