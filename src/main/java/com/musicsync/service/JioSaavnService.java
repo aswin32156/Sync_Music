@@ -3,16 +3,12 @@ package com.musicsync.service;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
-
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
@@ -21,159 +17,109 @@ import com.musicsync.model.Song;
 
 @Service
 public class JioSaavnService {
-
     private static final Logger log = LoggerFactory.getLogger(JioSaavnService.class);
-    private static final String BASE_URL = "https://jiosaavn-api-privatecvc2.vercel.app";
+    private static final String BASE_URL = "https://www.jiosaavn.com/api.php";
     private static final int MAX_SEARCH_LIMIT = 300;
-    private static final int PAGE_SIZE = 50;
-    private static final int MAX_PAGES = 6;
     private final RestTemplate restTemplate;
 
     public JioSaavnService() {
-        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-        requestFactory.setConnectTimeout(1300);
-        requestFactory.setReadTimeout(2300);
-        this.restTemplate = new RestTemplate(requestFactory);
+        SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
+        factory.setConnectTimeout(5000);
+        factory.setReadTimeout(10000);
+        this.restTemplate = new RestTemplate(factory);
     }
 
     public List<Song> searchSongs(String query, int limit) {
         List<Song> songs = new ArrayList<>();
         try {
+            if (query == null || query.isBlank()) {
+                return songs;
+            }
             int requested = Math.max(1, Math.min(limit, MAX_SEARCH_LIMIT));
-            int pageSize = Math.min(PAGE_SIZE, requested);
-            String encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8);
-            Set<String> seenIds = new LinkedHashSet<>();
-
-            for (int page = 1; page <= MAX_PAGES && songs.size() < requested; page++) {
-                String url = BASE_URL + "/search/songs?query=" + encodedQuery + "&limit=" + pageSize + "&page=" + page;
-                String response = restTemplate.getForObject(url, String.class);
-                if (response == null) break;
-
-                JsonObject json = JsonParser.parseString(response).getAsJsonObject();
-                String status = getStringField(json, "status");
-                if (!"SUCCESS".equals(status)) {
-                    break;
-                }
-
-                JsonObject data = json.getAsJsonObject("data");
-                if (data == null || !data.has("results")) break;
-
-                JsonArray results = data.getAsJsonArray("results");
-                if (results == null || results.isEmpty()) {
-                    break;
-                }
-
-                int addedInPage = 0;
-                for (JsonElement elem : results) {
-                    Song song = parseSong(elem.getAsJsonObject());
-                    if (song == null || song.getId() == null || song.getId().isBlank()) {
-                        continue;
+            log.info("JioSaavn searching for '{}' limit {}", query, requested);
+            String url = BASE_URL + "?__call=autocomplete.get&_format=json&_marker=0&query=" + URLEncoder.encode(query, StandardCharsets.UTF_8);
+            String response = restTemplate.getForObject(url, String.class);
+            if (response == null) {
+                log.warn("JioSaavn null response");
+                return songs;
+            }
+            log.debug("JioSaavn response length: {}", response.length());
+            JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+            if (json.has("songs")) {
+                JsonObject songsObj = json.getAsJsonObject("songs");
+                if (songsObj.has("data")) {
+                    JsonArray arr = songsObj.getAsJsonArray("data");
+                    log.info("Found {} songs", arr.size());
+                    for (JsonElement e : arr) {
+                        if (songs.size() >= requested) break;
+                        Song song = parseSong(e.getAsJsonObject());
+                        if (song != null) songs.add(song);
                     }
-                    if (seenIds.add(song.getId())) {
-                        songs.add(song);
-                        addedInPage++;
-                    }
-                    if (songs.size() >= requested) {
-                        break;
-                    }
-                }
-
-                if (addedInPage == 0 || results.size() < pageSize) {
-                    break;
                 }
             }
+            log.info("Returning {} songs", songs.size());
         } catch (Exception e) {
-            log.warn("JioSaavn search failed for query '{}': {}", query, e.getMessage());
+            log.error("JioSaavn search error", e);
         }
         return songs;
     }
 
     public Song getSongById(String saavnId) {
         try {
-            String url = BASE_URL + "/songs?id=" + URLEncoder.encode(saavnId, StandardCharsets.UTF_8);
+            if (saavnId == null || saavnId.isBlank()) return null;
+            String url = BASE_URL + "?__call=song.getDetails&_format=json&pids=" + URLEncoder.encode(saavnId, StandardCharsets.UTF_8);
             String response = restTemplate.getForObject(url, String.class);
             if (response == null) return null;
-
             JsonObject json = JsonParser.parseString(response).getAsJsonObject();
-            String status = getStringField(json, "status");
-            if (!"SUCCESS".equals(status)) return null;
-
-            JsonArray data = json.getAsJsonArray("data");
-            if (data == null || data.isEmpty()) return null;
-
-            return parseSong(data.get(0).getAsJsonObject());
+            if (json.has(saavnId)) return parseSong(json.getAsJsonObject(saavnId));
+            return null;
         } catch (Exception e) {
-            log.warn("JioSaavn getSongById failed for id '{}': {}", saavnId, e.getMessage());
+            log.warn("JioSaavn getSongById error: {}", e.getMessage());
             return null;
         }
     }
 
     private Song parseSong(JsonObject obj) {
         try {
-            String id = "jio_" + getStringField(obj, "id");
-            String title = getStringField(obj, "name");
+            String id = getField(obj, "id");
+            if (id == null || id.isEmpty()) return null;
+            String title = getField(obj, "title");
             if (title == null || title.isEmpty()) return null;
-
-            // Extract artist
-            String artist = getStringField(obj, "primaryArtists");
-            if (artist == null || artist.isEmpty()) artist = "Unknown Artist";
-
-            // Extract album
-            String album = "";
-            if (obj.has("album") && obj.get("album").isJsonObject()) {
-                album = getStringField(obj.getAsJsonObject("album"), "name");
+            String artist = "Unknown";
+            if (obj.has("more_info") && obj.get("more_info").isJsonObject()) {
+                String singers = getField(obj.getAsJsonObject("more_info"), "singers");
+                if (singers != null && !singers.isEmpty()) artist = singers;
             }
+            String album = getField(obj, "album");
             if (album == null) album = "";
-
-            // Extract cover image (get highest quality)
-            String coverUrl = "";
-            if (obj.has("image") && obj.get("image").isJsonArray()) {
-                JsonArray images = obj.getAsJsonArray("image");
-                for (int i = images.size() - 1; i >= 0; i--) {
-                    JsonObject img = images.get(i).getAsJsonObject();
-                    String link = getStringField(img, "link");
-                    if (link != null && !link.isEmpty()) {
-                        coverUrl = link;
-                        break;
-                    }
-                }
-            }
-
-            // Duration
+            String image = getField(obj, "image");
+            if (image == null) image = "";
             int duration = 0;
-            if (obj.has("duration")) {
+            if (obj.has("more_info")) {
                 try {
-                    duration = Integer.parseInt(obj.get("duration").getAsString());
+                    String dur = getField(obj.getAsJsonObject("more_info"), "duration");
+                    if (dur != null) duration = Integer.parseInt(dur);
                 } catch (Exception ignored) {}
             }
-
-            // Extract download/streaming URL (get highest quality)
-            String audioUrl = "";
-            if (obj.has("downloadUrl") && obj.get("downloadUrl").isJsonArray()) {
-                JsonArray downloads = obj.getAsJsonArray("downloadUrl");
-                for (int i = downloads.size() - 1; i >= 0; i--) {
-                    JsonObject dl = downloads.get(i).getAsJsonObject();
-                    String link = getStringField(dl, "link");
-                    if (link != null && !link.isEmpty()) {
-                        audioUrl = link;
-                        break;
-                    }
-                }
+            String audioUrl = null;
+            if (obj.has("more_info")) {
+                audioUrl = getField(obj.getAsJsonObject("more_info"), "vlink");
             }
-
-            if (audioUrl.isEmpty()) return null;
-
-            return new Song(id, title, artist, album, coverUrl, duration, audioUrl);
+            if (audioUrl == null || audioUrl.isEmpty()) audioUrl = "jio_" + id;
+            return new Song("jio_" + id, title, artist, album, image, duration, audioUrl);
         } catch (Exception e) {
-            log.debug("Failed to parse JioSaavn song: {}", e.getMessage());
+            log.debug("Parse error: {}", e.getMessage());
             return null;
         }
     }
 
-    private String getStringField(JsonObject obj, String field) {
-        if (obj.has(field) && !obj.get(field).isJsonNull()) {
-            return obj.get(field).getAsString();
-        }
+    private String getField(JsonObject obj, String field) {
+        if (obj == null || !obj.has(field)) return null;
+        try {
+            JsonElement e = obj.get(field);
+            if (e.isJsonNull()) return null;
+            if (e.isJsonPrimitive()) return e.getAsString();
+        } catch (Exception ignored) {}
         return null;
     }
 }

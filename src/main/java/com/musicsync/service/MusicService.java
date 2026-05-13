@@ -213,6 +213,7 @@ public class MusicService {
     }
 
     public List<Song> searchExternal(String query, int limit) {
+        System.out.println("searchExternal called with query='" + query + "' limit=" + limit);
         List<Song> results = new ArrayList<>();
         if (query == null || query.isBlank()) return results;
 
@@ -224,11 +225,16 @@ public class MusicService {
         CachedExternalSearch cachedSearch = externalSearchCache.get(searchKey);
         long now = System.currentTimeMillis();
         if (cachedSearch != null && (now - cachedSearch.cachedAt) <= SEARCH_CACHE_TTL_MS) {
+            System.out.println("Returning cached results");
             return new ArrayList<>(cachedSearch.results);
         }
+        System.out.println("No cache hit, calling providers");
 
         CompletableFuture<List<Song>> jioFuture = CompletableFuture
-            .supplyAsync(() -> collectProviderResultsWithVariants(jioSaavnService::searchSongs, normalizedQuery, providerLimit))
+            .supplyAsync(() -> {
+                System.out.println("JioSaavnService provider thread starting");
+                return collectProviderResultsWithVariants(jioSaavnService::searchSongs, normalizedQuery, providerLimit);
+            })
             .completeOnTimeout(List.of(), SEARCH_JIO_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                 .exceptionally(e -> List.of());
 
@@ -366,6 +372,8 @@ public class MusicService {
             try {
                 batch = provider.search(variant, limit);
             } catch (Exception e) {
+                System.err.println("Provider search error for variant '" + variant + "': " + e.getMessage());
+                e.printStackTrace();
                 continue;
             }
 
