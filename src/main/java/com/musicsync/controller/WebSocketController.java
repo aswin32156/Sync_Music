@@ -20,6 +20,7 @@ import com.musicsync.model.PlaybackState;
 import com.musicsync.model.Room;
 import com.musicsync.model.Song;
 import com.musicsync.model.User;
+import com.musicsync.service.JioSaavnService;
 import com.musicsync.service.MusicService;
 import com.musicsync.service.RoomService;
 
@@ -29,13 +30,16 @@ public class WebSocketController {
     private final SimpMessagingTemplate messagingTemplate;
     private final RoomService roomService;
     private final MusicService musicService;
+    private final JioSaavnService jioSaavnService;
 
     public WebSocketController(SimpMessagingTemplate messagingTemplate,
                                 RoomService roomService,
-                                MusicService musicService) {
+                                MusicService musicService,
+                                JioSaavnService jioSaavnService) {
         this.messagingTemplate = messagingTemplate;
         this.roomService = roomService;
         this.musicService = musicService;
+        this.jioSaavnService = jioSaavnService;
     }
 
     @MessageMapping("/room.register")
@@ -141,6 +145,7 @@ public class WebSocketController {
         if (song != null && song.getDurationSeconds() <= 0 && request.getDurationSeconds() > 0) {
             song.setDurationSeconds(request.getDurationSeconds());
         }
+        song = ensurePlayableSong(song, request);
         if (song == null) {
             song = musicService.resolveSongFromMetadata(
                     request.getSongId(),
@@ -361,6 +366,7 @@ public class WebSocketController {
     private void broadcastRoomState(String roomCode) {
         RoomState state = roomService.getRoomState(roomCode);
         if (state != null) {
+            state.setCurrentSong(ensurePlayableSong(state.getCurrentSong(), null));
             messagingTemplate.convertAndSend("/topic/room/" + roomCode + "/state", state);
         }
     }
@@ -382,11 +388,51 @@ public class WebSocketController {
 
         Map<String, Object> playbackUpdate = new java.util.HashMap<>();
         playbackUpdate.put("playbackState", psCopy);
-        playbackUpdate.put("currentSong", room.getCurrentSong() != null ? room.getCurrentSong() : Map.of());
+        Song currentSong = ensurePlayableSong(room.getCurrentSong(), null);
+        playbackUpdate.put("currentSong", currentSong != null ? currentSong : Map.of());
         playbackUpdate.put("queueSize", room.getQueue().size());
         playbackUpdate.put("syncTick", syncTick);
         playbackUpdate.put("serverTimeMs", System.currentTimeMillis());
         messagingTemplate.convertAndSend("/topic/room/" + roomCode + "/playback", (Object) playbackUpdate);
+    }
+
+    private Song ensurePlayableSong(Song song, QueueRequest request) {
+        if (song == null || song.getId() == null || song.getId().isBlank()) {
+            return null;
+        }
+
+        boolean needsAudio = song.getAudioUrl() == null
+                || song.getAudioUrl().isBlank()
+                || song.getAudioUrl().equals(song.getId())
+                || song.getAudioUrl().startsWith("jio_");
+        if (!needsAudio) {
+            return song;
+        }
+
+        try {
+            Song resolved = null;
+            if (song.getId().startsWith("jio_")) {
+                resolved = jioSaavnService.getSongById(song.getId().substring(4));
+            } else if (song.getId().startsWith("yt_") || song.getId().startsWith("ytv_")) {
+                String songId = request != null && request.getSongId() != null ? request.getSongId() : song.getId();
+                String title = request != null && request.getTitle() != null && !request.getTitle().isBlank()
+                        ? request.getTitle() : song.getTitle();
+                String artist = request != null && request.getArtist() != null && !request.getArtist().isBlank()
+                        ? request.getArtist() : song.getArtist();
+                String coverUrl = request != null && request.getCoverUrl() != null && !request.getCoverUrl().isBlank()
+                        ? request.getCoverUrl() : song.getCoverUrl();
+                int duration = request != null && request.getDurationSeconds() > 0
+                        ? request.getDurationSeconds() : song.getDurationSeconds();
+                resolved = musicService.resolveSongFromMetadata(songId, title, artist, song.getAlbum(), coverUrl, duration);
+            }
+
+            if (resolved != null && resolved.getAudioUrl() != null && !resolved.getAudioUrl().isBlank()) {
+                return resolved;
+            }
+        } catch (Exception ignored) {
+        }
+
+        return song;
     }
 
     private org.springframework.messaging.simp.SimpMessageHeaderAccessor createHeaders(String sessionId) {
