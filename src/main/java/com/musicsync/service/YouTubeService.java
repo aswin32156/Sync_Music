@@ -31,7 +31,6 @@ public class YouTubeService {
 
     private static final Logger log = LoggerFactory.getLogger(YouTubeService.class);
     private static final String API_URL = "https://www.googleapis.com/youtube/v3";
-    private static final String YT_MUSIC_API_URL = "https://yt.lemnoslife.com/noKey";
     private static final String WEB_SEARCH_URL = "https://www.youtube.com/results?search_query=";
     private static final String MUSIC_WEB_SEARCH_URL = "https://music.youtube.com/search?q=";
     private static final String OEMBED_URL = "https://www.youtube.com/oembed?url=";
@@ -51,12 +50,11 @@ public class YouTubeService {
     private final JioSaavnService jioSaavnService;
     private final Map<String, String> fallbackAudioCache = new ConcurrentHashMap<>();
     private volatile boolean apiKeyUsable = true;
-    private volatile boolean noKeyEndpointAvailable = true;
 
     public YouTubeService(JioSaavnService jioSaavnService) {
         SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-        requestFactory.setConnectTimeout(1500);
-        requestFactory.setReadTimeout(5200);
+        requestFactory.setConnectTimeout(3000);
+        requestFactory.setReadTimeout(8000);
         this.restTemplate = new RestTemplate(requestFactory);
         this.jioSaavnService = jioSaavnService;
     }
@@ -101,23 +99,6 @@ public class YouTubeService {
         if (isApiConfigured()) {
             List<Song> apiSongs = searchSongsWithApi(musicQuery, cappedLimit);
             for (Song song : apiSongs) {
-                if (!isLikelyMusicResult(song)) {
-                    continue;
-                }
-                if (seenIds.add(song.getId())) {
-                    songs.add(song);
-                }
-                if (songs.size() >= cappedLimit) {
-                    return songs;
-                }
-            }
-        }
-
-        if (songs.size() < cappedLimit && noKeyEndpointAvailable) {
-            // Dedicated YouTube Music API path. Keep this as final fallback because DNS/network
-            // failures on third-party hosts can block longer than regular YouTube web lookups.
-            List<Song> musicApiSongs = searchSongsWithMusicApi(musicQuery, cappedLimit);
-            for (Song song : musicApiSongs) {
                 if (!isLikelyMusicResult(song)) {
                     continue;
                 }
@@ -338,49 +319,6 @@ public class YouTubeService {
         }
 
         return parseDurationLabel(text);
-    }
-
-    private List<Song> searchSongsWithMusicApi(String query, int limit) {
-        List<Song> songs = new ArrayList<>();
-
-        try {
-            String encodedQuery = URLEncoder.encode(query, StandardCharsets.UTF_8);
-            int pageSize = Math.min(API_PAGE_SIZE, Math.max(1, limit));
-            String nextPageToken = null;
-
-            for (int page = 0; page < API_MAX_PAGES && songs.size() < limit; page++) {
-                String url = YT_MUSIC_API_URL + "/search?part=snippet&type=video&videoCategoryId=10"
-                        + "&maxResults=" + pageSize + "&q=" + encodedQuery;
-                if (nextPageToken != null && !nextPageToken.isBlank()) {
-                    url += "&pageToken=" + URLEncoder.encode(nextPageToken, StandardCharsets.UTF_8);
-                }
-
-                String response = restTemplate.getForObject(url, String.class);
-                if (response == null || response.isBlank()) return songs;
-
-                JsonObject json = JsonParser.parseString(response).getAsJsonObject();
-                JsonArray items = json.has("items") ? json.getAsJsonArray("items") : null;
-                if (items == null || items.isEmpty()) return songs;
-
-                for (int i = 0; i < items.size() && songs.size() < limit; i++) {
-                    JsonObject item = items.get(i).getAsJsonObject();
-                    Song song = parseSearchItem(item);
-                    if (song != null) {
-                        songs.add(song);
-                    }
-                }
-
-                nextPageToken = getStringField(json, "nextPageToken");
-                if (nextPageToken == null || nextPageToken.isBlank()) {
-                    break;
-                }
-            }
-        } catch (Exception e) {
-            noKeyEndpointAvailable = false;
-            log.warn("YouTube Music API search failed for query '{}': {}", query, e.getMessage());
-        }
-
-        return songs;
     }
 
     private String buildMusicQuery(String query) {
