@@ -79,6 +79,10 @@ let roomStatePollInterval = null;
 let ytVideoSafetyCheckInterval = null;
 let ytForcePlayInterval = null; // Continuous monitor to ensure playback never stops
 let friendsRefreshInterval = null;
+let lastForwardMoveAt = 0;
+let lastForwardMoveIndex = -1;
+let _lastUserMove = 0;
+let nextSongSent = false; // Shared flag to prevent double 'next' from ended event and progress timer
 
 function refreshFriendsDataSafely() {
     if (typeof loadFriends === 'function') {
@@ -174,12 +178,15 @@ function startYtVideoSafetyCheck() {
             : null;
         
         const isVideoSong = !!(activeSong && activeSong.id && activeSong.id.startsWith('ytv_'));
-        const userWantsPause = hasRecentYtUserPauseIntent();
         
         // If it's a video song AND user is NOT pausing → KEEP IT PLAYING
-        if (isVideoSong && !userWantsPause) {
+        if (isVideoSong && !ytUserPaused) {
             try {
                 const state = ytPlayer.getPlayerState();
+                // Don't restart ended videos — let the ENDED handler advance the queue
+                if (state === YT.PlayerState.ENDED) {
+                    return;
+                }
                 // ANY state that's not PLAYING or BUFFERING = RESUME
                 if (state !== YT.PlayerState.PLAYING && state !== YT.PlayerState.BUFFERING) {
                     console.log('[YouTube RELENTLESS] State ' + state + ' - FORCING PLAY NOW');
@@ -322,16 +329,27 @@ function stopAudioPlayback(clearSource = false) {
 }
 
 audioPlayer.addEventListener('ended', () => {
-    if (isHost) {
-        nextSong();
-    }
+    // Don't send next if user just clicked next/previous to avoid double-advance
+    if (Date.now() - _lastUserMove < 5000) return;
+    // Don't send next if already sent from progress timer
+    if (nextSongSent) return;
+    nextSongSent = true;
+    sendPlaybackCommand('next', 0);
 });
 
+let lastTimeSync = 0;
 audioPlayer.addEventListener('timeupdate', () => {
     currentTime = audioPlayer.currentTime;
     duration = audioPlayer.duration || 0;
     updateProgress();
+    const now = Date.now();
+    if (now - lastTimeSync >= 5000) {
+        lastTimeSync = now;
+        sendPlaybackCommand('timesync', audioPlayer.currentTime);
+    }
 });
+
+
 
 audioPlayer.addEventListener('loadedmetadata', () => {
     duration = audioPlayer.duration || 0;
@@ -364,10 +382,8 @@ audioPlayer.addEventListener('error', (e) => {
     console.error('Audio error details:', errorMsg);
     showToast(errorMsg + '. Try skipping to next song.', 'error');
     
-    // Auto-skip to next song if host
-    if (isHost) {
-        setTimeout(() => nextSong(), 2000);
-    }
+    // Auto-skip to next song
+    setTimeout(() => sendPlaybackCommand('next', 0), 2000);
 });
 
 audioPlayer.addEventListener('loadstart', () => {
@@ -550,24 +566,46 @@ function updateRoomUI(state) {
     // Users
     updateUsersList(roomUsers);
 
-    // Queue
-    updateQueue(roomQueue, state.playbackState);
+    // Queue - use local currentSongIndex if we're skipping playback update to avoid visual glitch
+    const queuePlaybackState = _skipPlayback 
+        ? { currentSongIndex: currentSongIndex } 
+        : state.playbackState;
+    updateQueue(roomQueue, queuePlaybackState);
 
-    // Playback
-    const playbackIndex = Number(state?.playbackState?.currentSongIndex);
-    const fallbackSong = Number.isInteger(playbackIndex)
-        && playbackIndex >= 0
-        && playbackIndex < roomQueue.length
-        ? roomQueue[playbackIndex]
-        : null;
-    const stateSong = (state.currentSong && state.currentSong.title)
-        ? state.currentSong
-        : fallbackSong;
+    // Playback - skip stale/backward index from server to prevent bounce-back.
+    // Always ignore server index if it's less than our local currentSongIndex (server hasn't caught up yet).
+    // Also skip briefly after user action to let server process the command.
+    var _skipPlayback = false;
+    var _timeSinceMove = Date.now() - _lastUserMove;
+    var _newIdx = state?.playbackState?.currentSongIndex;
+    
+    // Always block if server index is behind local (stale server state)
+    if (typeof _newIdx === 'number' && _newIdx >= 0 && _newIdx < currentSongIndex) {
+        _skipPlayback = true;
+        console.log('[updateRoomUI] Blocked stale backward index from server:', _newIdx, 'local:', currentSongIndex);
+        updateQueue(roomQueue, { currentSongIndex: currentSongIndex });
+    }
+    // Also skip for a short window after user action to let server process
+    else if (_timeSinceMove < 8000) {
+        _skipPlayback = true;
+    }
+    
+    if (!_skipPlayback) {
+        const playbackIndex = Number(state?.playbackState?.currentSongIndex);
+        const fallbackSong = Number.isInteger(playbackIndex)
+            && playbackIndex >= 0
+            && playbackIndex < roomQueue.length
+            ? roomQueue[playbackIndex]
+            : null;
+        const stateSong = (state.currentSong && state.currentSong.title)
+            ? state.currentSong
+            : fallbackSong;
 
-    if (stateSong) {
-        updateNowPlaying(stateSong, state.playbackState);
-    } else if (roomQueue.length === 0) {
-        updateNowPlaying(null, state.playbackState);
+        if (stateSong) {
+            updateNowPlaying(stateSong, state.playbackState);
+        } else if (roomQueue.length === 0) {
+            updateNowPlaying(null, state.playbackState);
+        }
     }
 
     // Check host status using the current user record in this room state.
@@ -701,7 +739,20 @@ function updateNowPlaying(song, playbackState) {
 
     const isVideoSong = !!(song.id && song.id.startsWith('ytv_'));
 
-    // Toggle player visibility
+    if (playbackState && Number.isFinite(playbackState.currentSongIndex)) {
+        var _newIdx = playbackState.currentSongIndex;
+        // ALWAYS ignore stale backward index
+        if (_newIdx < currentSongIndex) {
+            console.log('[updateNowPlaying] Blocked stale backward index:', _newIdx, 'local:', currentSongIndex);
+        } else {
+            // Reset nextSongSent when song index changes (forward progress)
+            if (_newIdx !== currentSongIndex) {
+                nextSongSent = false;
+            }
+            currentSongIndex = _newIdx;
+        }
+    }
+
     if (isVideoSong) {
         showYtVideoPlayer();
     } else {
@@ -722,18 +773,14 @@ function updateNowPlaying(song, playbackState) {
     document.getElementById('time-total').textContent = formatTime(duration);
 
     if (playbackState) {
-        currentSongIndex = playbackState.currentSongIndex;
         updatePlayPauseIcon();
 
         if (isVideoSong) {
-            // YouTube video playback via IFrame API
             isPlaying = playbackState.playing;
             currentTime = playbackState.currentTime || 0;
             stopAudioPlayback(false);
             const videoId = song.id.substring(4);
 
-            // Avoid re-driving the same iframe instance on every state/render update.
-            // Recreate/reload only when the selected video changes or player is missing.
             const shouldLoadVideo = !ytPlayer || ytPlayerVideoId !== videoId;
             if (shouldLoadVideo) {
                 loadYtVideo(videoId, currentTime, isPlaying);
@@ -747,21 +794,18 @@ function updateNowPlaying(song, playbackState) {
                 document.getElementById('sound-waves').classList.remove('active');
             }
         } else {
-            // Load audio for the current song — only if song changed
-            if (song && song.audioUrl && audioPlayer.getAttribute('data-song-id') !== song.id) {
+            if (song && audioPlayer.getAttribute('data-song-id') !== song.id) {
                 audioPlayer.setAttribute('data-song-id', song.id);
-                // Use server-side proxy for JioSaavn audio to avoid CORS and preview-link issues
                 if (song.id && song.id.startsWith('jio_')) {
                     audioPlayer.src = '/api/music/stream/' + encodeURIComponent(song.id);
                 } else {
-                    audioPlayer.src = song.audioUrl;
+                    audioPlayer.src = song.audioUrl || '';
                 }
                 audioPlayer.load();
 
                 isPlaying = playbackState.playing;
                 currentTime = playbackState.currentTime || 0;
 
-                // Sync seek position for new song
                 if (currentTime > 0) {
                     audioPlayer.currentTime = currentTime;
                 }
@@ -787,8 +831,6 @@ function updateNowPlaying(song, playbackState) {
                 }
             }
         }
-        // Same song still playing — don't touch audio, just update UI state
-        
         updateProgress();
     }
 }
@@ -952,6 +994,7 @@ const YT_BACKGROUND_PAUSE_GRACE_MS = 15000;
 const YT_FORCE_PLAY_CHECK_MS = 100; // Check every 100ms - relentless
 let ytUserPauseRequestedUntil = 0;
 const YT_USER_PAUSE_INTENT_WINDOW_MS = 8000; // 8 second window for user pause
+let ytUserPaused = false; // Set true when user explicitly pauses, cleared when they play
 
 function clearYtControlsHideTimeout() {
     if (ytControlsHideTimeout) {
@@ -1112,17 +1155,11 @@ window.toggleYtEnlarge = function() {
 
 function applyYtPreferredQuality(player) {
     if (!player) return;
-    const quality = YT_QUALITY_STEPS[Math.max(0, Math.min(ytQualityStepIndex, YT_QUALITY_STEPS.length - 1))];
-
+    // Let YouTube auto-select quality based on network conditions
+    // instead of forcing a specific level that may cause buffering
     try {
         if (typeof player.setPlaybackQualityRange === 'function') {
-            player.setPlaybackQualityRange(quality);
-        }
-    } catch (err) {}
-
-    try {
-        if (typeof player.setPlaybackQuality === 'function') {
-            player.setPlaybackQuality(quality);
+            player.setPlaybackQualityRange('small', 'large');
         }
     } catch (err) {}
 }
@@ -1132,7 +1169,7 @@ function trackYtBufferingAndAdapt(player) {
     ytRecentBufferEvents.push(now);
     ytRecentBufferEvents = ytRecentBufferEvents.filter(t => (now - t) <= 15000);
 
-    // If buffering repeats often, lower quality one step to stabilize playback.
+    // If buffering repeats often, restrict max quality to stabilize playback.
     if (
         ytRecentBufferEvents.length >= 3
         && ytQualityStepIndex < YT_QUALITY_STEPS.length - 1
@@ -1141,7 +1178,12 @@ function trackYtBufferingAndAdapt(player) {
         ytQualityStepIndex += 1;
         ytLastQualityChangeAt = now;
         ytRecentBufferEvents = [];
-        applyYtPreferredQuality(player);
+        const maxQuality = YT_QUALITY_STEPS[Math.max(0, Math.min(ytQualityStepIndex, YT_QUALITY_STEPS.length - 1))];
+        try {
+            if (typeof player.setPlaybackQualityRange === 'function') {
+                player.setPlaybackQualityRange('small', maxQuality);
+            }
+        } catch (err) {}
         showToast('Network is unstable. Lowered video quality for smoother playback.', 'info');
     }
 }
@@ -1203,10 +1245,8 @@ function maybeResumeYtAfterForeground() {
     const isVideoSong = !!(activeSong && activeSong.id && activeSong.id.startsWith('ytv_'));
     if (!isVideoSong || !ytPlayer || !window.YT) return;
     
-    const userWantsPause = hasRecentYtUserPauseIntent();
-    
     // If user NOT pausing AND it's a video → always resume
-    if (!userWantsPause) {
+    if (!ytUserPaused) {
         try {
             const state = ytPlayer.getPlayerState();
             if (state !== YT.PlayerState.PLAYING && state !== YT.PlayerState.BUFFERING) {
@@ -1332,15 +1372,9 @@ function _createYtPlayer(videoId, startTime, autoplay) {
                 const stateSyncSuppressed = isYtStateSyncSuppressed();
 
                 if (e.data === YT.PlayerState.ENDED) {
-                    waitForConnection(() => {
-                        if (currentRoom) {
-                            stompClient.send('/app/room.playback', {}, JSON.stringify({
-                                roomCode: currentRoom.roomCode,
-                                action: 'next',
-                                currentTime: 0
-                            }));
-                        }
-                    });
+                    // Don't send next if user just clicked next/previous to avoid double-advance
+                    if (Date.now() - _lastUserMove < 5000) return;
+                    sendPlaybackCommand('next', 0);
                 } else if (e.data === YT.PlayerState.PLAYING) {
                     const wasPlaying = isPlaying;
                     isPlaying = true;
@@ -1357,47 +1391,43 @@ function _createYtPlayer(videoId, startTime, autoplay) {
                     }
                 } else if (e.data === YT.PlayerState.PAUSED) {
                     const wasPlaying = isPlaying;
-                    const hasUserPauseIntent = hasRecentYtUserPauseIntent();
+                    const recentlyBackgrounded = Date.now() - ytLastBackgroundAt < 15000;
                     
-                    console.log('[YouTube PAUSE] User pause intent:', hasUserPauseIntent);
+                    console.log('[YouTube PAUSE] ytUserPaused:', ytUserPaused, '| recentlyBackgrounded:', recentlyBackgrounded, '| wasPlaying:', wasPlaying);
 
-                    // === SIMPLE RULE: ONLY accept pause if user explicitly clicked pause ===
-                    if (hasUserPauseIntent) {
-                        // User clicked pause - respect it
-                        console.log('[YouTube] ✓ User explicitly paused');
-                        isPlaying = false;
-                        updatePlayPauseIcon();
-                        stopProgressTimer();
-                        document.getElementById('sound-waves').classList.remove('active');
-
-                        if (shouldSyncVideoState && !stateSyncSuppressed && wasPlaying) {
-                            let videoTime = 0;
-                            try { videoTime = e.target.getCurrentTime() || 0; } catch (err) {}
-                            sendPlaybackCommand('pause', videoTime);
-                        }
+                    // === ONLY force-play if this is a known system/tab-background pause ===
+                    if (recentlyBackgrounded && wasPlaying) {
+                        // System pause from tab background, or YT internal state → force play
+                        console.log('[YouTube] ⚠️ SYSTEM/BACKGROUND PAUSE - FORCING RESUME');
+                        suppressYtStateSync(3000);
+                        
+                        try {
+                            if (ytPlayer && typeof ytPlayer.playVideo === 'function') {
+                                for (let i = 0; i < 8; i++) {
+                                    ytPlayer.playVideo();
+                                    setTimeout(() => { try { ytPlayer.playVideo(); } catch(e) {} }, i * 10);
+                                }
+                                console.log('[YouTube] FORCED PLAY - video will not pause');
+                            }
+                        } catch (err) {}
+                        
                         return;
                     }
 
-                    // === ALL OTHER PAUSES: IGNORE and RESUME ===
-                    // This covers: app background, tab hidden, system pause, browser minimize, etc.
-                    console.log('[YouTube] ⚠️ SYSTEM PAUSE - IGNORING and RESUMING LIKE MUSIC');
-                    suppressYtStateSync(3000);
-                    
-                    // DO NOT update isPlaying - keep it true
-                    // DO NOT update UI - pretend pause never happened
-                    // JUST FORCE PLAY
-                    try {
-                        if (ytPlayer && typeof ytPlayer.playVideo === 'function') {
-                            // BRUTAL: call play many times in rapid succession
-                            for (let i = 0; i < 8; i++) {
-                                ytPlayer.playVideo();
-                                setTimeout(() => { try { ytPlayer.playVideo(); } catch(e) {} }, i * 10);
-                            }
-                            console.log('[YouTube] FORCED PLAY - video will not pause');
-                        }
-                    } catch (err) {}
-                    
-                    return; // EXIT immediately - ignore everything else
+                    // === ALL OTHER PAUSES: RESPECT (user clicked app button, YT video directly, etc.) ===
+                    console.log('[YouTube] ✓ Respecting pause');
+                    ytUserPaused = true;
+                    isPlaying = false;
+                    updatePlayPauseIcon();
+                    stopProgressTimer();
+                    document.getElementById('sound-waves').classList.remove('active');
+
+                    if (shouldSyncVideoState && !stateSyncSuppressed && wasPlaying) {
+                        let videoTime = 0;
+                        try { videoTime = e.target.getCurrentTime() || 0; } catch (err) {}
+                        sendPlaybackCommand('pause', videoTime);
+                    }
+                    return;
                 }
             },
             onError: (e) => {
@@ -1501,7 +1531,7 @@ function hideYtVideoPlayer() {
     if (nowPlayingSection) nowPlayingSection.classList.remove('yt-video-active');
 }
 
-// ===== External Search (JioSaavn + YouTube Music + YouTube Videos) =====
+// ===== External Search (YouTube Music + YouTube Videos) =====
 let searchTimeout = null;
 let _allSearchResults = []; // cache last results for filter re-render
 let _activeFilters = new Set(['jiosaavn']);
@@ -1515,7 +1545,7 @@ function setSingleActiveSource(source) {
         target = Array.from(_activeFilters)[0] || 'jiosaavn';
     }
     if (!isYouTubeConfigured && (target === 'youtube' || target === 'youtubevideo')) {
-        target = 'jiosaavn';
+        target = Array.from(_activeFilters)[0] || 'jiosaavn';
     }
     _activeFilters = new Set([target]);
     return target;
@@ -1563,9 +1593,9 @@ function normalizeDurationSeconds(value) {
 
 function getFilteredSearchResults(results = _allSearchResults) {
     return (Array.isArray(results) ? results : []).filter(song => {
-        if (song.id.startsWith('jio_')) return _activeFilters.has('jiosaavn');
-        if (song.id.startsWith('ytv_')) return _activeFilters.has('youtubevideo');
-        if (song.id.startsWith('yt_')) return _activeFilters.has('youtube');
+        if (song.id && song.id.startsWith('jio_')) return _activeFilters.has('jiosaavn');
+        if (song.id && song.id.startsWith('ytv_')) return _activeFilters.has('youtubevideo');
+        if (song.id && song.id.startsWith('yt_')) return _activeFilters.has('youtube');
         return true;
     });
 }
@@ -1578,12 +1608,13 @@ function renderEmptyFilteredResults(resultsList) {
     </div>`;
 }
 
-function updateSourceFilterButtons(hasYouTube = false, hasYouTubeVideo = false) {
+function updateSourceFilterButtons(hasYouTube = false, hasYouTubeVideo = false, hasJio = false) {
     const jioBtn = document.getElementById('filter-jiosaavn');
     const youTubeBtn = document.getElementById('filter-youtube');
     const ytvBtn = document.getElementById('filter-youtubevideo');
     if (jioBtn) {
         jioBtn.classList.toggle('active', _activeFilters.has('jiosaavn'));
+        jioBtn.classList.toggle('has-results', !!hasJio);
     }
     if (youTubeBtn) {
         youTubeBtn.classList.toggle('disabled', !isYouTubeConfigured);
@@ -1609,6 +1640,7 @@ function buildSearchViewSnapshot(mode) {
         currentResultTab: currentSearchResultTab,
         hasYouTube: !!youTubeBtn && youTubeBtn.classList.contains('has-results'),
         hasYouTubeVideo: !!ytvBtn && ytvBtn.classList.contains('has-results')
+        , hasJio: !!document.getElementById('filter-jiosaavn') && document.getElementById('filter-jiosaavn').classList.contains('has-results')
     };
 }
 
@@ -1647,7 +1679,7 @@ function restoreSearchView(snapshot) {
     if (snapshot.mode === 'results') {
         _allSearchResults = cloneSearchResults(snapshot.allResults);
         if (emptyEl) emptyEl.classList.add('hidden');
-        updateSourceFilterButtons(snapshot.hasYouTube, snapshot.hasYouTubeVideo);
+        updateSourceFilterButtons(snapshot.hasYouTube, snapshot.hasYouTubeVideo, snapshot.hasJio);
         if (resultsList) {
             const filtered = getFilteredSearchResults(_allSearchResults);
             if (filtered.length === 0) {
@@ -1661,7 +1693,7 @@ function restoreSearchView(snapshot) {
         currentSearchResultTab = 'songs';
         if (resultsList) resultsList.innerHTML = '';
         if (emptyEl) emptyEl.classList.remove('hidden');
-        updateSourceFilterButtons(false);
+        updateSourceFilterButtons(false, false, false);
     }
 
     _updateSearchBackBtn();
@@ -1681,7 +1713,8 @@ window.toggleSourceFilter = function(source) {
 
     const hasYT = _allSearchResults.some(song => song.id.startsWith('yt_'));
     const hasYTV = _allSearchResults.some(song => song.id.startsWith('ytv_'));
-    updateSourceFilterButtons(hasYT, hasYTV);
+    const hasJio = _allSearchResults.some(song => song.id && song.id.startsWith('jio_'));
+    updateSourceFilterButtons(hasYT, hasYTV, hasJio);
     if (_allSearchResults.length > 0) {
         const filtered = getFilteredSearchResults(_allSearchResults);
         const resultsList = document.getElementById('search-results');
@@ -1754,7 +1787,8 @@ async function searchExternal(preserveCurrentView = true) {
         _allSearchResults = cloneSearchResults(songs);
         updateSourceFilterButtons(
             ytMusicSongs.length > 0,
-            ytVideoSongs.length > 0
+            ytVideoSongs.length > 0,
+            jioSongs.length > 0
         );
 
         renderSearchResults(_allSearchResults);
@@ -1776,7 +1810,7 @@ window.clearSearch = function() {
     if (resultsList) resultsList.innerHTML = '';
     const emptyEl = document.getElementById('search-empty');
     if (emptyEl) emptyEl.classList.remove('hidden');
-    updateSourceFilterButtons(false);
+    updateSourceFilterButtons(false, false, false);
     if (input) input.focus();
     _updateSearchBackBtn();
 };
@@ -1831,11 +1865,11 @@ function renderSearchResults(songs) {
     // ── Songs panel ───────────────────────────────────────────
     html += `<div class="sr-panel${activeResultTab === 'songs' ? '' : ' hidden'}" id="sr-panel-songs">`;
     html += songs.map(song => {
-        const sourceIcon = song.id.startsWith('jio_')
+        const sourceIcon = song.id && song.id.startsWith('jio_')
             ? '<span class="source-tag jio">JioSaavn</span>'
-            : song.id.startsWith('ytv_')
+            : song.id && song.id.startsWith('ytv_')
             ? '<span class="source-tag yt">YouTube Video</span>'
-            : song.id.startsWith('yt_')
+            : song.id && song.id.startsWith('yt_')
             ? '<span class="source-tag yt">YouTube Music</span>'
             : '';
         const albumPart = song.album ? ` <span class="song-meta-album"><i class="fas fa-compact-disc"></i> ${escapeHtml(song.album)}</span>` : '';
@@ -1927,9 +1961,10 @@ async function checkSources() {
 
         setSingleActiveSource(Array.from(_activeFilters)[0] || 'jiosaavn');
 
-        const hasYouTubeInResults = _allSearchResults.some(song => song.id.startsWith('yt_'));
-        const hasYouTubeVideoInResults = _allSearchResults.some(song => song.id.startsWith('ytv_'));
-        updateSourceFilterButtons(hasYouTubeInResults, hasYouTubeVideoInResults);
+        const hasYouTubeInResults = _allSearchResults.some(song => song.id && song.id.startsWith('yt_'));
+        const hasYouTubeVideoInResults = _allSearchResults.some(song => song.id && song.id.startsWith('ytv_'));
+        const hasJioInResults = _allSearchResults.some(song => song.id && song.id.startsWith('jio_'));
+        updateSourceFilterButtons(hasYouTubeInResults, hasYouTubeVideoInResults, hasJioInResults);
 
         if (_allSearchResults.length > 0) {
             const resultsList = document.getElementById('search-results');
@@ -1948,14 +1983,26 @@ async function checkSources() {
 const pendingAddSongs = new Set();
 
 function addToQueue(songId) {
-    if (pendingAddSongs.has(songId)) return; // prevent duplicate queuing
+    console.log('[addToQueue] called with songId:', songId, '| connected:', !!(stompClient && stompClient.connected), '| currentRoom:', !!currentRoom);
+    if (pendingAddSongs.has(songId)) { console.log('[addToQueue] blocked by pendingAddSongs'); return; }
+    if (!currentRoom) { showToast('Join a room first', 'error'); return; }
+    if (!stompClient || !stompClient.connected) {
+        pendingAddSongs.add(songId);
+        showToast('Connecting... song will be added shortly.', 'info');
+        waitForConnection(() => {
+            pendingAddSongs.delete(songId);
+            sendAddToQueue(songId);
+        });
+        return;
+    }
+    sendAddToQueue(songId);
+}
 
+function sendAddToQueue(songId) {
     const selectedSong = Array.isArray(_allSearchResults)
         ? _allSearchResults.find(song => song && song.id === songId)
         : null;
-
-    const doAdd = () => {
-        pendingAddSongs.delete(songId);
+    try {
         stompClient.send('/app/room.queue.add', {}, JSON.stringify({
             roomCode: currentRoom.roomCode,
             songId: songId,
@@ -1967,13 +2014,9 @@ function addToQueue(songId) {
             durationSeconds: selectedSong ? (selectedSong.durationSeconds || 0) : 0
         }));
         showToast('Song added to queue!', 'success');
-    };
-    if (stompClient && stompClient.connected) {
-        doAdd();
-    } else {
-        pendingAddSongs.add(songId);
-        showToast('Connecting... song will be added shortly.', 'info');
-        waitForConnection(doAdd);
+    } catch (err) {
+        console.error('AddToQueue STOMP error:', err);
+        showToast('Failed to add song. Check connection.', 'error');
     }
 }
 
@@ -1993,13 +2036,14 @@ function togglePlayPause() {
         ct = audioPlayer.currentTime || currentTime;
     }
 
-    const action = isPlaying ? 'pause' : 'play';
+    const wasPlaying = isPlaying;
+    isPlaying = !isPlaying;
+    updatePlayPauseIcon();
 
-    // For YouTube videos, trigger local play/pause directly from the click gesture
-    // to avoid autoplay-policy blocks before the websocket round trip completes.
     if (isVideoSong && currentSong) {
         const videoId = currentSong.id.substring(4);
-        if (action === 'play') {
+        if (isPlaying) {
+            ytUserPaused = false;
             loadYtVideo(videoId, ct, true);
             try {
                 if (ytPlayer && typeof ytPlayer.playVideo === 'function') {
@@ -2010,6 +2054,11 @@ function togglePlayPause() {
                 console.warn('[YouTube] Local play trigger failed:', err);
             }
         } else {
+            ytUserPaused = true;
+            // If player hasn't loaded yet, cancel the pending autoplay
+            if (ytPendingLoad) {
+                ytPendingLoad.autoplay = false;
+            }
             try {
                 if (ytPlayer && typeof ytPlayer.pauseVideo === 'function') {
                     markYtUserPauseIntent();
@@ -2020,48 +2069,89 @@ function togglePlayPause() {
                 console.warn('[YouTube] Local pause trigger failed:', err);
             }
         }
-
-        // Sync room state directly for control-button actions.
-        sendPlaybackCommand(action, ct);
-        return;
+    } else if (currentSong && currentSong.audioUrl) {
+        if (isPlaying) {
+            const p = audioPlayer.play();
+            if (p) p.catch(function(err) {
+                console.error('[Audio] play failed:', err);
+                requestUserAudioResume();
+            });
+            startProgressTimer();
+            document.getElementById('sound-waves').classList.add('active');
+        } else {
+            audioPlayer.pause();
+            stopProgressTimer();
+            document.getElementById('sound-waves').classList.remove('active');
+        }
     }
 
-    sendPlaybackCommand(action, ct);
+    sendPlaybackCommand(isPlaying ? 'play' : 'pause', ct);
 }
 
 function nextSong() {
-    if (!isHost) {
-        showToast('Only the host can switch songs', 'info');
+    if (!currentRoom || !Array.isArray(currentRoom.queue) || currentRoom.queue.length === 0) {
+        showToast('No songs in queue', 'info');
         return;
     }
+    var nextIdx = currentSongIndex + 1;
+    if (nextIdx >= currentRoom.queue.length) {
+        showToast('No next song - end of queue', 'info');
+        return;
+    }
+    currentSongIndex = nextIdx;
+    var song = currentRoom.queue[nextIdx];
+    isPlaying = true;
+    updatePlayPauseIcon();
+    nextSongSent = false; // Reset for new song
+    updateNowPlaying(song, { playing: true, currentSongIndex: nextIdx, currentTime: 0 });
+    startProgressTimer();
+    document.getElementById('sound-waves').classList.add('active');
+    _lastUserMove = Date.now();
     sendPlaybackCommand('next', 0);
 }
 
 function previousSong() {
-    if (!isHost) {
-        showToast('Only the host can switch songs', 'info');
+    if (!currentRoom || !Array.isArray(currentRoom.queue) || currentRoom.queue.length === 0) {
+        showToast('No songs in queue', 'info');
         return;
     }
-    const currentSong = currentRoom && currentRoom.queue ? currentRoom.queue[currentSongIndex] : null;
+    const currentSong = currentRoom.queue[currentSongIndex];
     const isVideoSong = currentSong && currentSong.id && currentSong.id.startsWith('ytv_');
     let ct = 0;
     if (isVideoSong && ytPlayer) {
         try { ct = ytPlayer.getCurrentTime() || 0; } catch(e) {}
     } else {
-        ct = audioPlayer.currentTime;
+        ct = audioPlayer.currentTime || currentTime;
     }
     if (ct > 3) {
+        currentTime = 0;
+        if (isVideoSong && ytPlayer) {
+            try { suppressYtStateSync(900); ytPlayer.seekTo(0, true); } catch(e) {}
+        } else {
+            try { audioPlayer.currentTime = 0; } catch(e) {}
+        }
+        updateProgress();
         sendPlaybackCommand('seek', 0);
     } else {
+        var prevIdx = currentSongIndex - 1;
+        if (prevIdx < 0) {
+            showToast('Already at first song', 'info');
+            return;
+        }
+        currentSongIndex = prevIdx;
+        var song = currentRoom.queue[prevIdx];
+        isPlaying = true;
+        updatePlayPauseIcon();
+        nextSongSent = false; // Reset for new song
+        updateNowPlaying(song, { playing: true, currentSongIndex: prevIdx, currentTime: 0 });
+        startProgressTimer();
+        document.getElementById('sound-waves').classList.add('active');
+        _lastUserMove = Date.now();
         sendPlaybackCommand('previous', 0);
     }
 }
 
 function playSongAtIndex(index) {
-    if (!isHost) {
-        showToast('Only the host can choose the next song', 'info');
-        return;
-    }
     if (!currentRoom || !Array.isArray(currentRoom.queue) || index < 0 || index >= currentRoom.queue.length) {
         showToast('Unable to select that song right now. Try again.', 'error');
         return;
@@ -2076,14 +2166,12 @@ function playSongAtIndex(index) {
         stopAudioPlayback(true);
     }
 
+    currentSongIndex = index;
+    nextSongSent = false; // Reset for new song
     sendPlaybackCommand('select', index);
 }
 
 function seekTo(event) {
-    if (!isHost) {
-        showToast('Only the host can seek in the song', 'info');
-        return;
-    }
     const bar = document.getElementById('progress-bar');
     const rect = bar.getBoundingClientRect();
     const pointerX = typeof event.clientX === 'number'
@@ -2105,7 +2193,6 @@ function seekTo(event) {
 
     const seekTime = pos * totalDuration;
 
-    // Apply immediately for host responsiveness; room sync keeps everyone aligned.
     currentTime = seekTime;
     if (isVideoSong && ytPlayer) {
         try {
@@ -2139,14 +2226,38 @@ function sendPlaybackCommand(action, time) {
     }
 }
 
-// ===== Progress Timer =====
 function startProgressTimer() {
     stopProgressTimer();
-    // Audio timeupdate event handles progress now, but keep a backup timer for UI sync
+    nextSongSent = false; // Reset shared flag when starting new song
     progressInterval = setInterval(() => {
-        if (isPlaying) {
-            updateProgress();
+        if (!isPlaying) return;
+
+        const currentSong = currentRoom && currentRoom.queue ? currentRoom.queue[currentSongIndex] : null;
+        const isVideoSong = currentSong && currentSong.id && currentSong.id.startsWith('ytv_');
+        
+        // Don't auto-advance if user just manually clicked next/previous
+        if (Date.now() - _lastUserMove < 5000) return;
+
+        if (!isVideoSong) {
+            const audDur = audioPlayer.duration, audCur = audioPlayer.currentTime;
+            if (audDur > 0 && audCur >= audDur - 0.5 && !nextSongSent) {
+                nextSongSent = true;
+                sendPlaybackCommand('next', 0);
+                return;
+            }
+        } else if (isVideoSong && !nextSongSent && ytPlayer) {
+            try {
+                const ytDur = ytPlayer.getDuration();
+                const ytCur = ytPlayer.getCurrentTime();
+                if (ytDur > 0 && ytCur >= ytDur - 1) {
+                    nextSongSent = true;
+                    sendPlaybackCommand('next', 0);
+                    return;
+                }
+            } catch (e) {}
         }
+
+        updateProgress();
     }, 500);
 }
 
@@ -2156,7 +2267,6 @@ function stopProgressTimer() {
         progressInterval = null;
     }
 }
-
 function updateProgress() {
     const fill = document.getElementById('progress-fill');
     const thumb = document.getElementById('progress-thumb');
@@ -2329,27 +2439,174 @@ function connectWebSocket(roomCode) {
 }
 
 function handlePlaybackUpdate(data) {
+    const isSyncTick = data.syncTick === true;
     const ps = data.playbackState;
+
+    console.log('[handlePlaybackUpdate] Received:', { isSyncTick, currentSongIndex, incomingIdx: ps?.currentSongIndex, playing: ps?.playing });
+
+    if (isSyncTick) {
+        // Sync tick: never change song index, audio source, now-playing display, OR playing state.
+        // Only sync current time to keep progress bars aligned.
+        // The playing state is set by local user actions (togglePlayPause) or
+        // authoritative command responses (non-sync-tick broadcasts). Overwriting
+        // it here creates a race where a sync tick arrives before the server
+        // processes the user's pause command, causing the video to auto-resume.
+        if (ps) {
+            const activeSong = currentRoom && Array.isArray(currentRoom.queue)
+                ? currentRoom.queue[currentSongIndex]
+                : null;
+            const isVideoNow = !!(activeSong && activeSong.id && activeSong.id.startsWith('ytv_'));
+
+            if (isVideoNow) {
+                const serverTime = Number(ps.currentTime);
+                if (Number.isFinite(serverTime) && serverTime >= 0) {
+                    currentTime = serverTime;
+                    try {
+                        if (ytPlayer && typeof ytPlayer.getCurrentTime === 'function') {
+                            const localVideoTime = ytPlayer.getCurrentTime() || 0;
+                            if (shouldResyncYtTime(localVideoTime, serverTime)) {
+                                suppressYtStateSync(1100);
+                                ytPlayer.seekTo(serverTime, true);
+                            }
+                        }
+                    } catch (err) {
+                        console.warn('[Playback] Failed to apply synced video time:', err);
+                    }
+                }
+
+                if (isPlaying) {
+                    try {
+                        const playerState = (ytPlayer && typeof ytPlayer.getPlayerState === 'function')
+                            ? ytPlayer.getPlayerState()
+                            : null;
+                        if (
+                            ytPlayer
+                            && typeof ytPlayer.playVideo === 'function'
+                            && playerState !== YT.PlayerState.PLAYING
+                            && playerState !== YT.PlayerState.BUFFERING
+                        ) {
+                            suppressYtStateSync(900);
+                            ytPlayer.playVideo();
+                        }
+                    } catch (err) {
+                        console.warn('[Playback] Failed to play video:', err);
+                    }
+                    startProgressTimer();
+                    document.getElementById('sound-waves').classList.add('active');
+                } else {
+                    try {
+                        const playerState = (ytPlayer && typeof ytPlayer.getPlayerState === 'function')
+                            ? ytPlayer.getPlayerState()
+                            : null;
+                        if (
+                            ytPlayer
+                            && typeof ytPlayer.pauseVideo === 'function'
+                            && (playerState === YT.PlayerState.PLAYING || playerState === YT.PlayerState.BUFFERING)
+                        ) {
+                            suppressYtStateSync(900);
+                            ytPlayer.pauseVideo();
+                        }
+                    } catch (err) {
+                        console.warn('[Playback] Failed to pause video:', err);
+                    }
+                    stopProgressTimer();
+                    document.getElementById('sound-waves').classList.remove('active');
+                }
+            } else if (activeSong && activeSong.audioUrl) {
+                const serverTime = Number(ps.currentTime);
+                if (Number.isFinite(serverTime) && serverTime >= 0) {
+                    const knownDuration = (Number.isFinite(audioPlayer.duration) && audioPlayer.duration > 0)
+                        ? audioPlayer.duration
+                        : duration;
+                    const clampedTime = knownDuration > 0 ? Math.min(serverTime, knownDuration) : serverTime;
+
+                    currentTime = clampedTime;
+                    if (Math.abs((audioPlayer.currentTime || 0) - clampedTime) > 0.7) {
+                        try {
+                            audioPlayer.currentTime = clampedTime;
+                        } catch (err) {
+                            console.warn('[Playback] Failed to apply synced time:', err);
+                        }
+                    }
+                }
+
+                if (isPlaying && audioPlayer.paused) {
+                    audioPlayer.play().catch(() => {
+                        requestUserAudioResume();
+                    });
+                    startProgressTimer();
+                    document.getElementById('sound-waves').classList.add('active');
+                } else if (!isPlaying && !audioPlayer.paused) {
+                    audioPlayer.pause();
+                    stopProgressTimer();
+                    document.getElementById('sound-waves').classList.remove('active');
+                }
+            }
+
+            updateProgress();
+        }
+
+        if (currentRoom && currentRoom.queue) {
+            updateQueue(currentRoom.queue, { currentSongIndex: currentSongIndex });
+        }
+        return;
+    }
+
+    console.log('[handlePlaybackUpdate] Non-sync-tick path:', { currentSongIndex_before: currentSongIndex, incomingIdx: ps?.currentSongIndex });
+
+    const incomingIdx = ps ? ps.currentSongIndex : -1;
+
+    // ALWAYS ignore stale backward index from server (server hasn't caught up to our optimistic update)
+    // This prevents bounce-back regardless of timing.
+    if (incomingIdx >= 0 && incomingIdx < currentSongIndex) {
+        console.log('[handlePlaybackUpdate] Ignoring stale backward index from server:', incomingIdx, 'local:', currentSongIndex);
+        if (currentRoom && currentRoom.queue) {
+            updateQueue(currentRoom.queue, { currentSongIndex: currentSongIndex });
+        }
+        return;
+    }
+
+    // If the index matches the optimistic value, skip the heavy updateNowPlaying call
+    // (avoids interfering with the audio transition) but still apply time/playing state.
+    const userJustMoved = (Date.now() - _lastUserMove < 5000);
+    if (userJustMoved && incomingIdx >= 0 && incomingIdx === currentSongIndex) {
+        console.log('[handlePlaybackUpdate] Index matches local, applying server time/state');
+        if (ps) {
+            currentTime = ps.currentTime || 0;
+            isPlaying = ps.playing;
+            updatePlayPauseIcon();
+            updateProgress();
+        }
+        if (currentRoom && currentRoom.queue) {
+            updateQueue(currentRoom.queue, { currentSongIndex: currentSongIndex });
+        }
+        return;
+    }
+
     const incomingSong = data.currentSong && data.currentSong.title ? data.currentSong : null;
-    const fallbackSong = (!incomingSong && ps && currentRoom && Array.isArray(currentRoom.queue)
-        && ps.currentSongIndex >= 0 && ps.currentSongIndex < currentRoom.queue.length)
-        ? currentRoom.queue[ps.currentSongIndex]
+    const fallbackSong = (ps && currentRoom && Array.isArray(currentRoom.queue)
+        && incomingIdx >= 0 && incomingIdx < currentRoom.queue.length)
+        ? currentRoom.queue[incomingIdx]
         : null;
     const song = incomingSong || fallbackSong;
 
-    const isVideoSong = !!(song && song.id && song.id.startsWith('ytv_'));
+    // Reset nextSongSent when song actually changes (forward progress)
+    if (song && song.title && incomingIdx !== currentSongIndex) {
+        nextSongSent = false;
+    }
 
     if (song && song.title) {
-        // Keep UI rendering in one place so both /state and /playback updates treat video songs the same.
         updateNowPlaying(song, ps);
     } else if (currentRoom && Array.isArray(currentRoom.queue) && currentRoom.queue.length === 0) {
         updateNowPlaying(null, ps);
     }
 
     if (ps) {
+        currentSongIndex = incomingIdx;
         isPlaying = ps.playing;
-        currentSongIndex = ps.currentSongIndex;
         updatePlayPauseIcon();
+
+        const isVideoSong = !!(song && song.id && song.id.startsWith('ytv_'));
 
         if (isVideoSong) {
             stopAudioPlayback(false);
@@ -2408,7 +2665,6 @@ function handlePlaybackUpdate(data) {
                 document.getElementById('sound-waves').classList.remove('active');
             }
         } else if (song && song.audioUrl) {
-            // Same audio song — sync position so seek works across clients.
             const serverTime = Number(ps.currentTime);
             if (Number.isFinite(serverTime) && serverTime >= 0) {
                 const knownDuration = (Number.isFinite(audioPlayer.duration) && audioPlayer.duration > 0)
@@ -2442,9 +2698,8 @@ function handlePlaybackUpdate(data) {
         updateProgress();
     }
 
-    // Update queue highlighting
     if (currentRoom && currentRoom.queue) {
-        updateQueue(currentRoom.queue, ps || { currentSongIndex: currentSongIndex });
+        updateQueue(currentRoom.queue, { currentSongIndex: currentSongIndex });
     }
 }
 
@@ -2554,7 +2809,7 @@ function goBackInSearch() {
         currentSearchResultTab = 'songs';
         if (resultsList) resultsList.innerHTML = '';
         if (emptyEl) emptyEl.classList.remove('hidden');
-        updateSourceFilterButtons(false);
+        updateSourceFilterButtons(false, false, false);
         if (input) input.focus();
     } else {
         const prev = tabHistory.length > 0 ? tabHistory.pop() : 'queue';

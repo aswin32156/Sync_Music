@@ -7,8 +7,8 @@
     <link rel="stylesheet" href="/css/style.css?v=20260408-more-search-results">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/sockjs-client@1/dist/sockjs.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+    <script src="/js/sockjs.min.js"></script>
+    <script src="/js/stomp.min.js"></script>
 </head>
 <body>
 
@@ -323,11 +323,12 @@
                                 <button class="btn-control" onclick="nextSong()" title="Next">
                                     <i class="fas fa-step-forward"></i>
                                 </button>
+                            
                             </div>
 
                             <div class="host-indicator" id="host-indicator">
                                 <i class="fas fa-crown"></i>
-                                <span>Listeners can play/pause, add, and move songs. Only host can remove, skip, or seek.</span>
+                                <span>Listeners can play, pause, add, move, and skip songs. Only host can remove or seek.</span>
                             </div>
                         </div>
                     </div>
@@ -372,7 +373,7 @@
                         </div>
                         <div class="search-sources" id="search-sources">
                             <button class="source-filter active" id="filter-jiosaavn" onclick="toggleSourceFilter('jiosaavn')" title="Show JioSaavn results only">
-                                <i class="fas fa-music"></i> JioSaavn
+                                <i class="fas fa-compact-disc"></i> JioSaavn
                             </button>
                             <button class="source-filter" id="filter-youtube" onclick="toggleSourceFilter('youtube')" title="Show YouTube Music results only">
                                 <i class="fab fa-youtube"></i> YouTube Music
@@ -436,6 +437,6 @@
         <span>Connecting...</span>
     </div>
 
-    <script src="/js/app.js?v=20260408-api-max-results"></script>
+    <script src="/js/app.js?v=20260618-fix-playback-v1"></script>
 </body>
 </html>

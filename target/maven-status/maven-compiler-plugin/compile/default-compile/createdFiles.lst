@@ -11,11 +11,14 @@ com\musicsync\dto\ChatRequest.class
 com\musicsync\dto\RoomState.class
 com\musicsync\controller\RoomController.class
 com\musicsync\dto\JoinRoomRequest.class
+com\musicsync\service\OfficialJioSaavnApiClient.class
+com\musicsync\controller\MediaProxyController.class
 com\musicsync\model\Song.class
 com\musicsync\dto\PlaybackCommand.class
 com\musicsync\model\ChatMessage.class
 com\musicsync\dto\CreateRoomRequest.class
 com\musicsync\model\Room.class
+com\musicsync\service\MusicProvider.class
 com\musicsync\service\SpotifyService.class
 com\musicsync\model\PersistentUser.class
 com\musicsync\dto\QueueRequest.class

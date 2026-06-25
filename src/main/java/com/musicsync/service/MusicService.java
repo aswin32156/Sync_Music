@@ -33,6 +33,7 @@ public class MusicService {
     private final Map<String, Song> externalSongsCache = new ConcurrentHashMap<>();
     private final Map<String, CachedExternalSearch> externalSearchCache = new ConcurrentHashMap<>();
     private final JioSaavnService jioSaavnService;
+    private final OfficialJioSaavnApiClient officialJioSaavnApiClient;
     private final YouTubeService youTubeService;
 
     private static final class CachedExternalSearch {
@@ -50,10 +51,20 @@ public class MusicService {
         List<Song> search(String query, int limit);
     }
 
-    public MusicService(JioSaavnService jioSaavnService, YouTubeService youTubeService) {
+    public MusicService(JioSaavnService jioSaavnService,
+                        OfficialJioSaavnApiClient officialJioSaavnApiClient,
+                        YouTubeService youTubeService) {
         this.jioSaavnService = jioSaavnService;
+        this.officialJioSaavnApiClient = officialJioSaavnApiClient;
         this.youTubeService = youTubeService;
         initializeLibrary();
+    }
+
+    private MusicProvider getActiveJioProvider() {
+        if (officialJioSaavnApiClient != null && officialJioSaavnApiClient.isEnabled()) {
+            return officialJioSaavnApiClient;
+        }
+        return jioSaavnService;
     }
 
     private void initializeLibrary() {
@@ -100,6 +111,12 @@ public class MusicService {
         return new ArrayList<>(library);
     }
 
+    public void cacheSong(Song song) {
+        if (song != null && song.getId() != null && !song.getId().isBlank()) {
+            externalSongsCache.put(song.getId(), song);
+        }
+    }
+
     public Song getSongById(String id) {
         // Check local library first
         Song local = library.stream()
@@ -111,18 +128,32 @@ public class MusicService {
         // Check external songs cache
         Song cached = externalSongsCache.get(id);
         if (cached != null) {
-            // Search can cache YouTube metadata quickly with unresolved audio.
-            // Resolve audio lazily when a song is actually requested for playback.
-            boolean unresolvedYouTubeAudio = id.startsWith("yt_")
-                    && (cached.getAudioUrl() == null || cached.getAudioUrl().isBlank());
-            if (!unresolvedYouTubeAudio) {
+            // Skip cache for songs with unresolved/preview audio URLs so they get re-resolved
+            boolean needsReResolve = false;
+            String cachedAudio = cached.getAudioUrl();
+            if (id.startsWith("jio_") && cachedAudio != null && !cachedAudio.isBlank()) {
+                String lower = cachedAudio.toLowerCase();
+                if (lower.contains("preview") || lower.contains("jiotune")) {
+                    needsReResolve = true;
+                }
+            }
+            if (id.startsWith("yt_") && (cachedAudio == null || cachedAudio.isBlank())) {
+                needsReResolve = true;
+            }
+            if (!needsReResolve) {
                 return cached;
             }
         }
 
         // Try to fetch from external APIs by ID
         if (id.startsWith("jio_")) {
-            Song song = jioSaavnService.getSongById(id.substring(4));
+            Song song = getActiveJioProvider().getSongById(id.substring(4));
+            if (song != null) {
+                externalSongsCache.put(song.getId(), song);
+                return song;
+            }
+        } else if (id.startsWith("ytv_")) {
+            Song song = youTubeService.getVideoContentById(id.substring(4));
             if (song != null) {
                 externalSongsCache.put(song.getId(), song);
                 return song;
@@ -149,12 +180,6 @@ public class MusicService {
                 externalSongsCache.put(song.getId(), song);
                 return song;
             }
-        } else if (id.startsWith("ytv_")) {
-            Song song = youTubeService.getVideoContentById(id.substring(4));
-            if (song != null) {
-                externalSongsCache.put(song.getId(), song);
-                return song;
-            }
         }
         return null;
     }
@@ -175,14 +200,16 @@ public class MusicService {
 
         Song resolved = null;
 
-        if (id.startsWith("yt_")) {
-            resolved = youTubeService.resolveSongFromMetadata(
-                    id.substring(3),
-                    normalizedTitle,
-                    normalizedArtist,
-                    normalizedCover,
-                    normalizedDuration);
-        } else if (id.startsWith("ytv_")) {
+        if (id.startsWith("ytv_")) {
+            String videoId = id.substring(4);
+            String safeTitle = normalizedTitle.isBlank() ? "YouTube Video" : normalizedTitle;
+            String safeArtist = normalizedArtist.isBlank() ? "YouTube" : normalizedArtist;
+            String safeAlbum = normalizedAlbum.isBlank() ? "YouTube Video" : normalizedAlbum;
+            String safeCover = normalizedCover.isBlank()
+                    ? "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg"
+                    : normalizedCover;
+            resolved = new Song(id, safeTitle, safeArtist, safeAlbum, safeCover, normalizedDuration, "");
+        } else if (id.startsWith("yt_")) {
             String videoId = id.substring(4);
             String safeTitle = normalizedTitle.isBlank() ? "YouTube Video" : normalizedTitle;
             String safeArtist = normalizedArtist.isBlank() ? "YouTube" : normalizedArtist;
@@ -231,10 +258,7 @@ public class MusicService {
         System.out.println("No cache hit, calling providers");
 
         CompletableFuture<List<Song>> jioFuture = CompletableFuture
-            .supplyAsync(() -> {
-                System.out.println("JioSaavnService provider thread starting");
-                return collectProviderResultsWithVariants(jioSaavnService::searchSongs, normalizedQuery, providerLimit);
-            })
+            .supplyAsync(() -> collectProviderResultsWithVariants(getActiveJioProvider()::searchSongs, normalizedQuery, providerLimit))
             .completeOnTimeout(List.of(), SEARCH_JIO_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                 .exceptionally(e -> List.of());
 
@@ -255,6 +279,18 @@ public class MusicService {
         jioResults = rankByRelevance(normalizedQuery, jioResults);
         ytResults = rankByRelevance(normalizedQuery, ytResults);
         ytvResults = rankByRelevance(normalizedQuery, ytvResults);
+
+        // Keep preview items in search results - they will be resolved to full-length
+        // when the song is added to queue via getSongById() / ensurePlayableSong()
+        // Only filter out entries with no valid ID or title
+        List<Song> filteredJio = new ArrayList<>();
+        for (Song s : jioResults) {
+            if (s == null) continue;
+            if (s.getId() == null || s.getId().isBlank()) continue;
+            if (s.getTitle() == null || s.getTitle().isBlank()) continue;
+            filteredJio.add(s);
+        }
+        jioResults = filteredJio;
 
         if (!ytResults.isEmpty() && !ytvResults.isEmpty()) {
             Set<String> videoIdsInYtv = new LinkedHashSet<>();
@@ -316,9 +352,10 @@ public class MusicService {
         }
 
         Set<String> seenIds = new LinkedHashSet<>();
-        appendUnique(results, jioResults, seenIds);
+        // Prefer YouTube Music and Video results over JioSaavn previews
         appendUnique(results, ytResults, seenIds);
         appendUnique(results, ytvResults, seenIds);
+        appendUnique(results, jioResults, seenIds);
 
         // Cache results so queue add can resolve by ID later.
         for (Song song : results) {
@@ -331,7 +368,7 @@ public class MusicService {
         if (hasAnyYouTubeResult) {
             externalSearchCache.put(searchKey, new CachedExternalSearch(now, new ArrayList<>(results)));
         } else {
-            // Do not cache degraded jio-only snapshots; allow a new attempt on the next search.
+            // Do not cache degraded snapshots; allow a new attempt on the next search.
             externalSearchCache.remove(searchKey);
         }
 
@@ -467,9 +504,7 @@ public class MusicService {
         }
 
         if (song.getId() != null) {
-            if (song.getId().startsWith("jio_")) {
-                score += 10;
-            } else if (song.getId().startsWith("yt_")) {
+            if (song.getId().startsWith("yt_")) {
                 score += 8;
             } else if (song.getId().startsWith("ytv_")) {
                 score += 4;
@@ -589,7 +624,6 @@ public class MusicService {
     public Map<String, Object> getAvailableSources() {
         boolean youtubeConfigured = youTubeService.isConfigured();
         List<String> sources = new ArrayList<>();
-        sources.add("jiosaavn");
         if (youtubeConfigured) {
             sources.add("youtube");
             sources.add("youtubevideo");

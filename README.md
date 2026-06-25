@@ -1,11 +1,11 @@
 # 🎵 MusicSync - Real-Time Collaborative Music Player
 
-A real-time synchronized music listening platform where friends can create rooms, add songs from millions of tracks (JioSaavn), and listen together in perfect sync.
+A real-time synchronized music listening platform where friends can create rooms, add songs from millions of tracks, and listen together in perfect sync.
 
 ## ✨ Features
 
 - **🎧 Real-Time Sync** - WebSocket-based instant synchronization across all listeners
-- **🎵 Millions of Songs** - Search and play songs via JioSaavn + YouTube Music APIs
+- **🎵 Millions of Songs** - Search and play songs via YouTube Music APIs
 - **👥 Room System** - Create password-protected or public rooms
 - **💬 Live Chat** - Chat while listening together
 - **👫 Friends System** - Add friends, see who's online, join their rooms
@@ -22,8 +22,8 @@ A real-time synchronized music listening platform where friends can create rooms
 
 ```bash
 # Clone the repository
-git clone <your-repo-url>
-cd musicsync
+git clone https://github.com/aswin32156/Sync_Music.git
+cd Sync_Music
 
 # Run the application
 ./mvnw spring-boot:run
@@ -84,7 +84,7 @@ cd musicsync
 
 - **Backend:** Spring Boot 3.2.3, Java 21
 - **WebSocket:** STOMP over SockJS
-- **APIs:** JioSaavn (millions of songs), YouTube Data API v3 (optional)
+- **APIs:** Official JioSaavn partner API support when credentials are available, YouTube Data API v3 (optional)
 - **Frontend:** Vanilla JavaScript, HTML5 Audio API
 - **Deployment:** Docker, Render.com
 
@@ -116,8 +116,14 @@ server.address=0.0.0.0
 # Optional: Add YouTube API key for YouTube Music metadata search
 youtube.api-key=your_youtube_api_key
 
+# Optional: Official JioSaavn partner API settings
+jiosaavn.api-base-url=https://your-jiosaavn-partner-api.example.com
+jiosaavn.api-key=your_jiosaavn_api_key
+
 # OR set environment variable (recommended)
 YOUTUBE_API_KEY=your_youtube_api_key
+JIOSAAVN_API_BASE_URL=https://your-jiosaavn-partner-api.example.com
+JIOSAAVN_API_KEY=your_jiosaavn_api_key
 ```
 
 ### YouTube Setup (Optional, Improves Reliability)
@@ -129,6 +135,15 @@ YOUTUBE_API_KEY=your_youtube_api_key
 5. Restart the app, then verify: `GET /api/music/sources` returns `"youtubeApiConfigured": true`
 
 Without an API key, MusicSync still searches YouTube using a web metadata fallback.
+
+### JioSaavn Partner Setup
+
+1. Request official partner/API access from JioSaavn.
+2. Set `JIOSAAVN_API_BASE_URL` and `JIOSAAVN_API_KEY` after approval.
+3. Restart the app.
+4. The official JioSaavn client will take over automatically when both values are present.
+
+If partner access is not available, the app will continue to work with YouTube-first fallback behavior.
 
 ## 📱 Network Access
 

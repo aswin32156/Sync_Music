@@ -20,8 +20,8 @@ import com.musicsync.model.PlaybackState;
 import com.musicsync.model.Room;
 import com.musicsync.model.Song;
 import com.musicsync.model.User;
-import com.musicsync.service.JioSaavnService;
 import com.musicsync.service.MusicService;
+import com.musicsync.service.JioSaavnService;
 import com.musicsync.service.RoomService;
 
 @Controller
@@ -79,60 +79,63 @@ public class WebSocketController {
         User sender = roomService.findUserBySession(roomCode, sessionId);
         if (sender == null) return;
 
-        boolean hostOnlyAction = "next".equals(action)
-                || "previous".equals(action)
-                || "seek".equals(action)
+        boolean hostOnlyAction = "seek".equals(action)
                 || "select".equals(action);
         if (hostOnlyAction && !sender.isHost()) {
             return;
         }
 
-        PlaybackState state = room.getPlaybackState();
+        synchronized (room) {
+            PlaybackState state = room.getPlaybackState();
 
-        switch (action) {
-            case "play":
-                state.setPlaying(true);
-                state.setCurrentTime(command.getCurrentTime());
-                break;
-            case "pause":
-                state.setPlaying(false);
-                state.setCurrentTime(command.getCurrentTime());
-                break;
-            case "seek":
-                state.setCurrentTime(command.getCurrentTime());
-                break;
-            case "next":
-                int nextIndex = state.getCurrentSongIndex() + 1;
-                if (nextIndex < room.getQueue().size()) {
-                    state.setCurrentSongIndex(nextIndex);
-                    state.setCurrentTime(0);
+            switch (action) {
+                case "play":
                     state.setPlaying(true);
-                } else {
+                    state.setCurrentTime(command.getCurrentTime());
+                    break;
+                case "pause":
                     state.setPlaying(false);
-                    state.setCurrentTime(0);
-                }
-                break;
-            case "previous":
-                int prevIndex = state.getCurrentSongIndex() - 1;
-                if (prevIndex >= 0) {
-                    state.setCurrentSongIndex(prevIndex);
-                    state.setCurrentTime(0);
-                    state.setPlaying(true);
-                }
-                break;
-            case "select":
-                int selectIndex = (int) command.getCurrentTime();
-                if (selectIndex >= 0 && selectIndex < room.getQueue().size()) {
-                    state.setCurrentSongIndex(selectIndex);
-                    state.setCurrentTime(0);
-                    state.setPlaying(true);
-                }
-                break;
-            default:
-                break;
-        }
+                    state.setCurrentTime(command.getCurrentTime());
+                    break;
+                case "seek":
+                    state.setCurrentTime(command.getCurrentTime());
+                    break;
+                case "next":
+                    int nextIndex = state.getCurrentSongIndex() + 1;
+                    if (nextIndex < room.getQueue().size()) {
+                        state.setCurrentSongIndex(nextIndex);
+                        state.setCurrentTime(0);
+                        state.setPlaying(true);
+                    } else {
+                        state.setPlaying(false);
+                        state.setCurrentTime(0);
+                    }
+                    break;
+                case "previous":
+                    int prevIndex = state.getCurrentSongIndex() - 1;
+                    if (prevIndex >= 0) {
+                        state.setCurrentSongIndex(prevIndex);
+                        state.setCurrentTime(0);
+                        state.setPlaying(true);
+                    }
+                    break;
+                case "select":
+                    int selectIndex = (int) command.getCurrentTime();
+                    if (selectIndex >= 0 && selectIndex < room.getQueue().size()) {
+                        state.setCurrentSongIndex(selectIndex);
+                        state.setCurrentTime(0);
+                        state.setPlaying(true);
+                    }
+                    break;
+                case "timesync":
+                    state.setCurrentTime(command.getCurrentTime());
+                    break;
+                default:
+                    break;
+            }
 
-        broadcastPlaybackState(roomCode);
+            broadcastPlaybackState(roomCode);
+        }
     }
 
     @MessageMapping("/room.queue.add")
@@ -155,7 +158,20 @@ public class WebSocketController {
                     request.getCoverUrl(),
                     request.getDurationSeconds());
         }
-        if (song == null) return;
+        // If resolution still failed, create a basic entry from request metadata
+        // so the song can be queued and resolved lazily on playback
+        if (song == null) {
+            if (request.getSongId() == null || request.getSongId().isBlank()) return;
+            String title = request.getTitle() != null && !request.getTitle().isBlank() ? request.getTitle() : "Unknown";
+            String artist = request.getArtist() != null && !request.getArtist().isBlank() ? request.getArtist() : "Unknown Artist";
+            String album = request.getAlbum() != null ? request.getAlbum() : "";
+            String cover = request.getCoverUrl() != null ? request.getCoverUrl() : "";
+            int duration = request.getDurationSeconds() > 0 ? request.getDurationSeconds() : 0;
+            song = new Song(request.getSongId(), title, artist, album, cover, duration, request.getSongId());
+        }
+
+        // Update cache with resolved song so proxy gets full-length audio URL
+        musicService.cacheSong(song);
 
         Song queuedSong = new Song(
             song.getId(), song.getTitle(), song.getArtist(), song.getAlbum(),
@@ -164,23 +180,25 @@ public class WebSocketController {
         queuedSong.setAddedBy(request.getUsername());
         room.addSongToQueue(queuedSong);
 
-        // Auto-play if this is the first song in the queue
-        if (room.getQueue().size() == 1) {
-            PlaybackState state = room.getPlaybackState();
-            state.setCurrentSongIndex(0);
-            state.setCurrentTime(0);
-            state.setPlaying(true);
+        ChatMessage systemMsg = null;
+        synchronized (room) {
+            // Auto-play if this is the first song in the queue
+            if (room.getQueue().size() == 1) {
+                PlaybackState state = room.getPlaybackState();
+                state.setCurrentSongIndex(0);
+                state.setCurrentTime(0);
+                state.setPlaying(true);
+            }
+
+            systemMsg = new ChatMessage(
+                UUID.randomUUID().toString(), "System", "#1DB954",
+                request.getUsername() + " added \"" + song.getTitle() + "\" to the queue", "system"
+            );
+            room.addChatMessage(systemMsg);
+
+            broadcastRoomState(roomCode);
+            broadcastPlaybackState(roomCode);
         }
-
-        ChatMessage systemMsg = new ChatMessage(
-            UUID.randomUUID().toString(), "System", "#1DB954",
-            request.getUsername() + " added \"" + song.getTitle() + "\" to the queue", "system"
-        );
-        room.addChatMessage(systemMsg);
-
-        // broadcastRoomState first so client loads the song, then playback state triggers play
-        broadcastRoomState(roomCode);
-        broadcastPlaybackState(roomCode);
         messagingTemplate.convertAndSend("/topic/room/" + roomCode + "/chat", systemMsg);
     }
 
@@ -218,32 +236,34 @@ public class WebSocketController {
             }
         }
 
-        room.removeSongFromQueue(songId);
+        synchronized (room) {
+            room.removeSongFromQueue(songId);
 
-        // Adjust currentSongIndex if needed
-        if (removedIndex >= 0) {
-            PlaybackState state = room.getPlaybackState();
-            int currentIdx = state.getCurrentSongIndex();
-            if (removedIndex < currentIdx) {
-                state.setCurrentSongIndex(currentIdx - 1);
-            } else if (removedIndex == currentIdx) {
-                // Current song removed - stop or play next
-                if (currentIdx >= room.getQueue().size()) {
-                    state.setCurrentSongIndex(Math.max(0, room.getQueue().size() - 1));
-                }
-                if (room.getQueue().isEmpty()) {
-                    state.setPlaying(false);
-                    state.setCurrentTime(0);
-                    state.setCurrentSongIndex(0);
-                } else {
-                    state.setCurrentTime(0);
-                    state.setPlaying(true);
+            // Adjust currentSongIndex if needed
+            if (removedIndex >= 0) {
+                PlaybackState state = room.getPlaybackState();
+                int currentIdx = state.getCurrentSongIndex();
+                if (removedIndex < currentIdx) {
+                    state.setCurrentSongIndex(currentIdx - 1);
+                } else if (removedIndex == currentIdx) {
+                    // Current song removed - stop or play next
+                    if (currentIdx >= room.getQueue().size()) {
+                        state.setCurrentSongIndex(Math.max(0, room.getQueue().size() - 1));
+                    }
+                    if (room.getQueue().isEmpty()) {
+                        state.setPlaying(false);
+                        state.setCurrentTime(0);
+                        state.setCurrentSongIndex(0);
+                    } else {
+                        state.setCurrentTime(0);
+                        state.setPlaying(true);
+                    }
                 }
             }
-        }
 
-        broadcastRoomState(roomCode);
-        broadcastPlaybackState(roomCode);
+            broadcastRoomState(roomCode);
+            broadcastPlaybackState(roomCode);
+        }
     }
 
     @MessageMapping("/room.queue.reorder")
@@ -255,22 +275,23 @@ public class WebSocketController {
         Room room = roomService.getRoom(roomCode);
         if (room == null) return;
 
-        // Adjust currentSongIndex to follow the currently playing song
-        PlaybackState state = room.getPlaybackState();
-        int currentIdx = state.getCurrentSongIndex();
+        synchronized (room) {
+            PlaybackState state = room.getPlaybackState();
+            int currentIdx = state.getCurrentSongIndex();
 
-        room.reorderQueue(fromIndex, toIndex);
+            room.reorderQueue(fromIndex, toIndex);
 
-        if (currentIdx == fromIndex) {
-            state.setCurrentSongIndex(toIndex);
-        } else if (fromIndex < currentIdx && toIndex >= currentIdx) {
-            state.setCurrentSongIndex(currentIdx - 1);
-        } else if (fromIndex > currentIdx && toIndex <= currentIdx) {
-            state.setCurrentSongIndex(currentIdx + 1);
+            if (currentIdx == fromIndex) {
+                state.setCurrentSongIndex(toIndex);
+            } else if (fromIndex < currentIdx && toIndex >= currentIdx) {
+                state.setCurrentSongIndex(currentIdx - 1);
+            } else if (fromIndex > currentIdx && toIndex <= currentIdx) {
+                state.setCurrentSongIndex(currentIdx + 1);
+            }
+
+            broadcastRoomState(roomCode);
+            broadcastPlaybackState(roomCode);
         }
-
-        broadcastRoomState(roomCode);
-        broadcastPlaybackState(roomCode);
     }
 
     @MessageMapping("/room.chat")
@@ -328,18 +349,20 @@ public class WebSocketController {
         for (Room room : roomService.getAllRoomsSnapshot()) {
             if (room == null) continue;
 
-            PlaybackState state = room.getPlaybackState();
-            Song currentSong = room.getCurrentSong();
-            if (state == null || currentSong == null || !state.isPlaying()) {
-                continue;
-            }
+            synchronized (room) {
+                PlaybackState state = room.getPlaybackState();
+                Song currentSong = room.getCurrentSong();
+                if (state == null || currentSong == null || !state.isPlaying()) {
+                    continue;
+                }
 
-            double estimatedTime = state.getEstimatedCurrentTime();
-            int songDuration = currentSong.getDurationSeconds();
+                double estimatedTime = state.getEstimatedCurrentTime();
+                int songDuration = currentSong.getDurationSeconds();
 
-            if (songDuration > 0 && estimatedTime >= songDuration) {
-                advanceToNextSong(room);
-                continue;
+                if (songDuration > 0 && estimatedTime >= songDuration) {
+                    advanceToNextSong(room);
+                    continue;
+                }
             }
 
             broadcastPlaybackState(room.getRoomCode(), true);
@@ -347,20 +370,22 @@ public class WebSocketController {
     }
 
     private void advanceToNextSong(Room room) {
-        PlaybackState state = room.getPlaybackState();
-        int nextIndex = state.getCurrentSongIndex() + 1;
+        synchronized (room) {
+            PlaybackState state = room.getPlaybackState();
+            int nextIndex = state.getCurrentSongIndex() + 1;
 
-        if (nextIndex < room.getQueue().size()) {
-            state.setCurrentSongIndex(nextIndex);
-            state.setCurrentTime(0);
-            state.setPlaying(true);
-        } else {
-            state.setPlaying(false);
-            state.setCurrentTime(0);
+            if (nextIndex < room.getQueue().size()) {
+                state.setCurrentSongIndex(nextIndex);
+                state.setCurrentTime(0);
+                state.setPlaying(true);
+            } else {
+                state.setPlaying(false);
+                state.setCurrentTime(0);
+            }
+
+            broadcastRoomState(room.getRoomCode());
+            broadcastPlaybackState(room.getRoomCode(), false);
         }
-
-        broadcastRoomState(room.getRoomCode());
-        broadcastPlaybackState(room.getRoomCode(), false);
     }
 
     private void broadcastRoomState(String roomCode) {
@@ -402,17 +427,23 @@ public class WebSocketController {
         }
 
         boolean needsAudio = song.getAudioUrl() == null
-                || song.getAudioUrl().isBlank()
-                || song.getAudioUrl().equals(song.getId())
-                || song.getAudioUrl().startsWith("jio_");
+            || song.getAudioUrl().isBlank()
+            || song.getAudioUrl().equals(song.getId());
         if (!needsAudio) {
-            return song;
+            // Even if audio URL exists, check if it's a preview that needs resolving
+            String audio = song.getAudioUrl();
+            boolean isPreview = audio.contains("preview") || audio.contains("media_preview");
+            if (!isPreview) {
+                return song;
+            }
         }
 
         try {
             Song resolved = null;
             if (song.getId().startsWith("jio_")) {
-                resolved = jioSaavnService.getSongById(song.getId().substring(4));
+                try {
+                    resolved = jioSaavnService.getSongById(song.getId().substring(4));
+                } catch (Exception ignored) {}
             } else if (song.getId().startsWith("yt_") || song.getId().startsWith("ytv_")) {
                 String songId = request != null && request.getSongId() != null ? request.getSongId() : song.getId();
                 String title = request != null && request.getTitle() != null && !request.getTitle().isBlank()
@@ -427,6 +458,58 @@ public class WebSocketController {
             }
 
             if (resolved != null && resolved.getAudioUrl() != null && !resolved.getAudioUrl().isBlank()) {
+                String audio = resolved.getAudioUrl();
+                boolean looksLikePreview = audio == null || audio.isBlank()
+                    || audio.contains("preview")
+                    || audio.contains("media_preview")
+                    || (resolved.getDurationSeconds() > 0 && resolved.getDurationSeconds() < 30);
+
+                if (looksLikePreview) {
+                    // For JioSaavn songs with preview URLs, try to resolve full-length via getSongById
+                    if (resolved.getId() != null && resolved.getId().startsWith("jio_") && resolved.getId().length() > 4) {
+                        try {
+                            Song fullLength = jioSaavnService.getSongById(resolved.getId().substring(4));
+                            if (fullLength != null && fullLength.getAudioUrl() != null
+                                    && !fullLength.getAudioUrl().isBlank()
+                                    && !fullLength.getAudioUrl().contains("preview")
+                                    && !fullLength.getAudioUrl().equals(resolved.getId())) {
+                                return fullLength;
+                            }
+                        } catch (Exception ignored) {}
+                    }
+
+                    // Try searching for a full-length alternative
+                    try {
+                        String altQuery = (resolved.getTitle() == null ? "" : resolved.getTitle())
+                                + " " + (resolved.getArtist() == null ? "" : resolved.getArtist());
+                        if (!altQuery.isBlank()) {
+                            List<Song> alt = musicService.searchExternal(altQuery.trim(), 10);
+                            for (Song candidate : alt) {
+                                if (candidate == null) continue;
+                                String ca = candidate.getAudioUrl();
+                                if (ca == null || ca.isBlank()) continue;
+                                if (ca.contains("preview") || ca.contains("media_preview")) continue;
+                                // Prefer JioSaavn songs with full-length URLs, or YouTube songs with resolved audio
+                                if (candidate.getDurationSeconds() > 30 || (candidate.getId() != null && candidate.getId().startsWith("yt_"))) {
+                                    // For yt_ candidates, ensure they have a valid audio URL (not a placeholder)
+                                    if (candidate.getId() != null && candidate.getId().startsWith("yt_")) {
+                                        Song resolvedYt = musicService.resolveSongFromMetadata(
+                                                candidate.getId(), candidate.getTitle(), candidate.getArtist(),
+                                                candidate.getAlbum(), candidate.getCoverUrl(), candidate.getDurationSeconds());
+                                        if (resolvedYt != null && resolvedYt.getAudioUrl() != null
+                                                && !resolvedYt.getAudioUrl().isBlank()
+                                                && !resolvedYt.getAudioUrl().contains("preview")) {
+                                            return resolvedYt;
+                                        }
+                                    } else {
+                                        return candidate;
+                                    }
+                                }
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                }
+
                 return resolved;
             }
         } catch (Exception ignored) {

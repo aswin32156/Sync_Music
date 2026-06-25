@@ -1307,10 +1307,6 @@ body {
     font-size: 0.75rem;
     font-weight: 600;
 }
-.source-badge.jiosaavn {
-    background: rgba(30, 215, 96, 0.15);
-    color: #1ED760;
-}
 .source-badge.youtube {
     background: rgba(255, 0, 0, 0.15);
     color: #FF3B30;
@@ -1339,11 +1335,6 @@ body {
 .source-filter.active {
     opacity: 1;
 }
-#filter-jiosaavn.active {
-    background: rgba(30, 215, 96, 0.15);
-    border-color: #1ED760;
-    color: #1ED760;
-}
 #filter-youtube {
     display: inline-flex;
 }
@@ -1369,6 +1360,17 @@ body {
     opacity: 0.28;
     filter: grayscale(1);
     cursor: not-allowed;
+}
+
+#filter-jiosaavn.active {
+    background: linear-gradient(90deg, #ff7a00 0%, #ff3d00 100%);
+    border-color: #ff7a00;
+    color: #000;
+}
+
+.source-badge.jiosaavn {
+    background: linear-gradient(90deg, #ff7a00 0%, #ff3d00 100%);
+    color: #fff;
 }
 
 /* YouTube Video Player in Now Playing */
@@ -1796,13 +1798,14 @@ body {
     letter-spacing: 0.5px;
     flex-shrink: 0;
 }
-.source-tag.jio {
-    background: rgba(30, 215, 96, 0.15);
-    color: #1ED760;
-}
 .source-tag.yt {
     background: rgba(255, 59, 48, 0.15);
     color: #FF3B30;
+}
+
+.source-tag.jio {
+    background: linear-gradient(90deg, #ff7a00 0%, #ff3d00 100%);
+    color: #fff;
 }
 
 /* ===== Listeners Modal ===== */

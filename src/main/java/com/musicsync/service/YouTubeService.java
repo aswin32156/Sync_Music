@@ -4,6 +4,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -898,6 +899,24 @@ public class YouTubeService {
 
             if (bestCandidate != null && bestCandidate.getAudioUrl() != null && !bestCandidate.getAudioUrl().isBlank()) {
                 String fallbackUrl = bestCandidate.getAudioUrl();
+                // If the candidate URL is a preview or the candidate has no encrypted URL,
+                // try to resolve the full-length song via getSongById
+                if (fallbackUrl.contains("preview") || fallbackUrl.contains("media_preview")
+                        || (bestCandidate.getDurationSeconds() > 0 && bestCandidate.getDurationSeconds() < 30)
+                        || bestCandidate.getId().startsWith("jio_")) {
+                    try {
+                        String jioId = bestCandidate.getId();
+                        if (jioId != null && jioId.startsWith("jio_")) {
+                            Song fullSong = jioSaavnService.getSongById(jioId.substring(4));
+                            if (fullSong != null && fullSong.getAudioUrl() != null
+                                    && !fullSong.getAudioUrl().isBlank()
+                                    && !fullSong.getAudioUrl().contains("preview")
+                                    && !fullSong.getAudioUrl().equals(jioId)) {
+                                fallbackUrl = fullSong.getAudioUrl();
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                }
                 fallbackAudioCache.put(videoId, fallbackUrl);
                 return fallbackUrl;
             }
@@ -1088,6 +1107,28 @@ public class YouTubeService {
                     break;
                 }
             }
+
+            // Batch-fetch durations for video content from API
+            if (!songs.isEmpty()) {
+                List<String> videoIds = new ArrayList<>();
+                for (Song s : songs) {
+                    if (s != null && s.getId() != null && s.getId().startsWith("ytv_")) {
+                        videoIds.add(s.getId().substring(4));
+                    }
+                }
+                if (!videoIds.isEmpty()) {
+                    Map<String, Integer> durations = fetchVideoDurations(videoIds);
+                    for (Song s : songs) {
+                        if (s != null && s.getId() != null && s.getId().startsWith("ytv_")) {
+                            String vid = s.getId().substring(4);
+                            Integer dur = durations.get(vid);
+                            if (dur != null && dur > 0) {
+                                s.setDurationSeconds(dur);
+                            }
+                        }
+                    }
+                }
+            }
         } catch (Exception e) {
             if (looksLikeInvalidApiKey(e)) {
                 apiKeyUsable = false;
@@ -1095,6 +1136,45 @@ public class YouTubeService {
             log.warn("YouTube Data API video content search failed for query '{}': {}", query, e.getMessage());
         }
         return songs;
+    }
+
+    private Map<String, Integer> fetchVideoDurations(List<String> videoIds) {
+        Map<String, Integer> durations = new HashMap<>();
+        if (videoIds == null || videoIds.isEmpty() || !isApiConfigured()) return durations;
+
+        try {
+            for (int start = 0; start < videoIds.size(); start += 50) {
+                int end = Math.min(start + 50, videoIds.size());
+                String ids = String.join(",", videoIds.subList(start, end));
+                String url = API_URL + "/videos?part=contentDetails&id="
+                        + URLEncoder.encode(ids, StandardCharsets.UTF_8)
+                        + "&key=" + URLEncoder.encode(apiKey, StandardCharsets.UTF_8);
+
+                String response = restTemplate.getForObject(url, String.class);
+                if (response == null) continue;
+
+                JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+                JsonArray items = json.has("items") ? json.getAsJsonArray("items") : null;
+                if (items == null) continue;
+
+                for (JsonElement item : items) {
+                    if (!item.isJsonObject()) continue;
+                    JsonObject obj = item.getAsJsonObject();
+                    String vid = getStringField(obj, "id");
+                    if (vid == null || vid.isBlank()) continue;
+                    if (!obj.has("contentDetails") || !obj.get("contentDetails").isJsonObject()) continue;
+                    String isoDuration = getStringField(obj.getAsJsonObject("contentDetails"), "duration");
+                    int duration = parseDurationSeconds(isoDuration);
+                    if (duration > 0) {
+                        durations.put(vid, duration);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            log.warn("Failed to fetch video durations: {}", e.getMessage());
+        }
+
+        return durations;
     }
 
     private boolean looksLikeInvalidApiKey(Exception e) {
@@ -1159,6 +1239,45 @@ public class YouTubeService {
 
     public Song getVideoContentById(String videoId) {
         if (videoId == null || videoId.isBlank()) return null;
+
+        // Try API first for full details including duration
+        if (isApiConfigured()) {
+            try {
+                String url = API_URL + "/videos?part=snippet,contentDetails&id="
+                        + URLEncoder.encode(videoId, StandardCharsets.UTF_8)
+                        + "&key=" + URLEncoder.encode(apiKey, StandardCharsets.UTF_8);
+                String response = restTemplate.getForObject(url, String.class);
+                if (response != null) {
+                    JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+                    JsonArray items = json.has("items") ? json.getAsJsonArray("items") : null;
+                    if (items != null && !items.isEmpty()) {
+                        JsonObject item = items.get(0).getAsJsonObject();
+                        if (item.has("snippet") && item.get("snippet").isJsonObject()) {
+                            JsonObject snippet = item.getAsJsonObject("snippet");
+                            String title = getStringField(snippet, "title");
+                            String artist = getStringField(snippet, "channelTitle");
+                            String coverUrl = getThumbnailUrl(snippet);
+                            int duration = 0;
+                            if (item.has("contentDetails") && item.get("contentDetails").isJsonObject()) {
+                                String isoDuration = getStringField(item.getAsJsonObject("contentDetails"), "duration");
+                                duration = parseDurationSeconds(isoDuration);
+                            }
+                            if (title != null && !title.isBlank()) {
+                                if (artist == null || artist.isBlank()) artist = "YouTube";
+                                if (coverUrl == null || coverUrl.isBlank()) {
+                                    coverUrl = "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg";
+                                }
+                                return new Song("ytv_" + videoId, title, artist, "YouTube Video", coverUrl, duration, "");
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("YouTube Data API getVideoContentById failed for id '{}': {}", videoId, e.getMessage());
+            }
+        }
+
+        // Fallback: oEmbed for title and thumbnail
         try {
             String watchUrl = "https://www.youtube.com/watch?v=" + videoId;
             String url = OEMBED_URL + URLEncoder.encode(watchUrl, StandardCharsets.UTF_8) + "&format=json";
@@ -1177,6 +1296,39 @@ public class YouTubeService {
         } catch (Exception e) {
             log.warn("YouTube oEmbed getVideoContentById failed for id '{}': {}", videoId, e.getMessage());
         }
+
+        // Scrape watch page for duration as last resort
+        try {
+            String watchUrl = "https://www.youtube.com/watch?v=" + videoId;
+            String html = restTemplate.getForObject(watchUrl, String.class);
+            if (html != null) {
+                String title = null;
+                int duration = 0;
+
+                // Try to extract title
+                java.util.regex.Matcher titleMatcher = java.util.regex.Pattern.compile("<title>(.*?)</title>").matcher(html);
+                if (titleMatcher.find()) {
+                    title = titleMatcher.group(1).replace(" - YouTube", "").trim();
+                }
+
+                // Try to extract duration from ytInitialPlayerResponse
+                java.util.regex.Pattern durationPattern = java.util.regex.Pattern.compile("\"lengthSeconds\":\"?(\\d+)\"?");
+                java.util.regex.Matcher durMatcher = durationPattern.matcher(html);
+                if (durMatcher.find()) {
+                    try {
+                        duration = Integer.parseInt(durMatcher.group(1));
+                    } catch (NumberFormatException ignored) {}
+                }
+
+                if (title != null && !title.isBlank()) {
+                    return new Song("ytv_" + videoId, title, "YouTube", "YouTube Video",
+                            "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg", duration, "");
+                }
+            }
+        } catch (Exception e) {
+            log.warn("YouTube web scrape getVideoContentById failed for id '{}': {}", videoId, e.getMessage());
+        }
+
         String coverUrl = "https://i.ytimg.com/vi/" + videoId + "/hqdefault.jpg";
         return new Song("ytv_" + videoId, "YouTube Video", "YouTube", "YouTube Video", coverUrl, 0, "");
     }

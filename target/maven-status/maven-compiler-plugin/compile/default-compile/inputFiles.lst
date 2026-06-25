@@ -1,23 +1,26 @@
-D:\Project\New folder\src\main\java\com\musicsync\config\CorsConfig.java
-D:\Project\New folder\src\main\java\com\musicsync\config\WebSocketConfig.java
-D:\Project\New folder\src\main\java\com\musicsync\controller\RoomController.java
-D:\Project\New folder\src\main\java\com\musicsync\controller\WebSocketController.java
-D:\Project\New folder\src\main\java\com\musicsync\dto\ChatRequest.java
-D:\Project\New folder\src\main\java\com\musicsync\dto\CreateRoomRequest.java
-D:\Project\New folder\src\main\java\com\musicsync\dto\JoinRoomRequest.java
-D:\Project\New folder\src\main\java\com\musicsync\dto\PlaybackCommand.java
-D:\Project\New folder\src\main\java\com\musicsync\dto\QueueRequest.java
-D:\Project\New folder\src\main\java\com\musicsync\dto\RoomState.java
-D:\Project\New folder\src\main\java\com\musicsync\model\ChatMessage.java
-D:\Project\New folder\src\main\java\com\musicsync\model\PersistentUser.java
-D:\Project\New folder\src\main\java\com\musicsync\model\PlaybackState.java
-D:\Project\New folder\src\main\java\com\musicsync\model\Room.java
-D:\Project\New folder\src\main\java\com\musicsync\model\Song.java
-D:\Project\New folder\src\main\java\com\musicsync\model\User.java
-D:\Project\New folder\src\main\java\com\musicsync\MusicSyncApplication.java
-D:\Project\New folder\src\main\java\com\musicsync\service\JioSaavnService.java
-D:\Project\New folder\src\main\java\com\musicsync\service\MusicService.java
-D:\Project\New folder\src\main\java\com\musicsync\service\RoomService.java
-D:\Project\New folder\src\main\java\com\musicsync\service\SpotifyService.java
-D:\Project\New folder\src\main\java\com\musicsync\service\UserService.java
-D:\Project\New folder\src\main\java\com\musicsync\service\YouTubeService.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\config\CorsConfig.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\config\WebSocketConfig.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\controller\MediaProxyController.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\controller\RoomController.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\controller\WebSocketController.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\dto\ChatRequest.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\dto\CreateRoomRequest.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\dto\JoinRoomRequest.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\dto\PlaybackCommand.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\dto\QueueRequest.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\dto\RoomState.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\model\ChatMessage.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\model\PersistentUser.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\model\PlaybackState.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\model\Room.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\model\Song.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\model\User.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\MusicSyncApplication.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\service\JioSaavnService.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\service\MusicProvider.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\service\MusicService.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\service\OfficialJioSaavnApiClient.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\service\RoomService.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\service\SpotifyService.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\service\UserService.java
+D:\Project\New folder - Copy\src\main\java\com\musicsync\service\YouTubeService.java

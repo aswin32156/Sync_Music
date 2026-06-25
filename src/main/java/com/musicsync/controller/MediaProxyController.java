@@ -28,14 +28,18 @@ public class MediaProxyController {
     private final MusicService musicService;
     private final JioSaavnService jioSaavnService;
     private final RestTemplate restTemplate;
+    private final String jioCookie;
 
     public MediaProxyController(MusicService musicService, JioSaavnService jioSaavnService) {
         this.musicService = musicService;
         this.jioSaavnService = jioSaavnService;
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(5000);
-        factory.setReadTimeout(20000);
+        factory.setReadTimeout(30000);
+        
         this.restTemplate = new RestTemplate(factory);
+        String cookie = System.getenv("JIOSAAVN_COOKIE");
+        this.jioCookie = (cookie == null || cookie.isBlank()) ? null : cookie.trim();
     }
 
     @GetMapping("/api/music/stream/{songId}")
@@ -53,8 +57,8 @@ public class MediaProxyController {
             }
 
             String remoteUrl = song.getAudioUrl();
-            if (songId.startsWith("jio_") && (remoteUrl == null || remoteUrl.isBlank() || remoteUrl.startsWith("jio_"))) {
-                Song resolved = jioSaavnService.getSongById(songId.substring(4));
+            if (song.getId().startsWith("jio_") && (remoteUrl == null || remoteUrl.isBlank() || remoteUrl.startsWith("jio_"))) {
+                Song resolved = jioSaavnService.getSongById(song.getId().substring(4));
                 if (resolved != null && resolved.getAudioUrl() != null && !resolved.getAudioUrl().isBlank()) {
                     remoteUrl = resolved.getAudioUrl();
                 }
@@ -66,15 +70,45 @@ public class MediaProxyController {
             }
 
             // Stream remote response directly to client
-            RequestCallback requestCallback = clientHttpRequest -> {};
+            final String proxiedUrl = remoteUrl;
+            RequestCallback requestCallback = clientHttpRequest -> {
+                try {
+                    // Always send browser-like headers to CDN
+                    clientHttpRequest.getHeaders().add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+                    clientHttpRequest.getHeaders().add("Referer", "https://www.jiosaavn.com/");
+                    if (this.jioCookie != null) {
+                        clientHttpRequest.getHeaders().add("Cookie", this.jioCookie);
+                    }
+                    // Forward Range header for seeking support
+                    try {
+                        Object attrs = org.springframework.web.context.request.RequestContextHolder.getRequestAttributes();
+                        if (attrs instanceof org.springframework.web.context.request.ServletRequestAttributes) {
+                            String rangeHeader = ((org.springframework.web.context.request.ServletRequestAttributes) attrs).getRequest().getHeader("Range");
+                            if (rangeHeader != null && !rangeHeader.isBlank()) {
+                                clientHttpRequest.getHeaders().add("Range", rangeHeader);
+                            }
+                        }
+                    } catch (Exception ignored) {}
+                } catch (Exception e) {
+                    // ignore header attach errors
+                }
+            };
 
             ResponseExtractor<Void> responseExtractor = (ClientHttpResponse clientResp) -> {
-                String contentType = clientResp.getHeaders().getFirst("Content-Type");
-                if (contentType != null) response.setContentType(contentType);
-                String cl = clientResp.getHeaders().getFirst("Content-Length");
-                if (cl != null) {
-                    try { response.setContentLength(Integer.parseInt(cl)); } catch (Exception ignored) {}
+                // Forward status code (important for 206 Partial Content)
+                int statusCode = clientResp.getStatusCode().value();
+                if (statusCode == 206) {
+                    response.setStatus(HttpServletResponse.SC_PARTIAL_CONTENT);
                 }
+
+                // Forward all response headers
+                clientResp.getHeaders().forEach((name, values) -> {
+                    if ("Transfer-Encoding".equalsIgnoreCase(name)) return;
+                    if ("Date".equalsIgnoreCase(name)) return;
+                    for (String value : values) {
+                        response.addHeader(name, value);
+                    }
+                });
 
                 try (InputStream in = clientResp.getBody(); OutputStream out = response.getOutputStream()) {
                     byte[] buf = new byte[8192];
@@ -87,7 +121,7 @@ public class MediaProxyController {
                 return null;
             };
 
-            restTemplate.execute(remoteUrl, HttpMethod.GET, requestCallback, responseExtractor);
+            restTemplate.execute(proxiedUrl, HttpMethod.GET, requestCallback, responseExtractor);
 
         } catch (Exception e) {
             log.error("Failed to stream song {}: {}", songId, e.getMessage());
