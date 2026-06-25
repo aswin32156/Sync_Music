@@ -56,6 +56,17 @@ public class JioSaavnService implements MusicProvider {
         List<Song> results = new ArrayList<>();
         if (query == null || query.isBlank()) return results;
 
+        // Try primary search API first, fall back to autocomplete API
+        results = searchViaGetResults(query, limit);
+        if (!results.isEmpty()) return results;
+
+        // Fallback: autocomplete API (sometimes has different response format)
+        results = searchViaAutocomplete(query, limit);
+        return results;
+    }
+
+    private List<Song> searchViaGetResults(String query, int limit) {
+        List<Song> results = new ArrayList<>();
         try {
             String encoded = URLEncoder.encode(query, StandardCharsets.UTF_8);
             int page = 0;
@@ -66,15 +77,31 @@ public class JioSaavnService implements MusicProvider {
                 ResponseEntity<String> res = rest.getForEntity(url, String.class);
                 if (res.getBody() == null) break;
 
-                JsonObject json = JsonParser.parseString(res.getBody()).getAsJsonObject();
+                String body = res.getBody().trim();
+                if (body.isEmpty() || body.equals("[]") || body.equals("{}")) break;
+
+                // Handle JSONP-style responses: some JioSaavn endpoints wrap in a function call
+                if (body.startsWith("function") || body.startsWith("__")) {
+                    int start = body.indexOf('{');
+                    if (start >= 0) {
+                        body = body.substring(start);
+                        int end = body.lastIndexOf('}');
+                        if (end >= 0) body = body.substring(0, end + 1);
+                    }
+                }
 
                 JsonArray arr = null;
-                if (json.has("results") && json.get("results").isJsonArray()) {
-                    arr = json.getAsJsonArray("results");
+                if (body.startsWith("[")) {
+                    arr = JsonParser.parseString(body).getAsJsonArray();
+                } else {
+                    JsonObject json = JsonParser.parseString(body).getAsJsonObject();
+                    if (json.has("results") && json.get("results").isJsonArray()) {
+                        arr = json.getAsJsonArray("results");
+                    }
                 }
                 if (arr == null || arr.size() == 0) break;
 
-                System.out.println("JioSaavn search (page " + page + "): got " + arr.size() + " items");
+                System.out.println("JioSaavn search (getResults page " + page + "): got " + arr.size() + " items");
                 for (JsonElement e : arr) {
                     Song s = parseSongElement(e);
                     if (s != null && s.getId() != null && !s.getId().isBlank()) {
@@ -85,11 +112,56 @@ public class JioSaavnService implements MusicProvider {
                 }
                 page++;
             }
-            System.out.println("JioSaavn search: total " + results.size() + " songs for '" + query + "'");
+            if (!results.isEmpty()) {
+                System.out.println("JioSaavn searchViaGetResults: total " + results.size() + " songs for '" + query + "'");
+            }
         } catch (Exception e) {
-            log.debug("JioSaavn search error for '{}': {}", query, e.getMessage());
+            log.warn("JioSaavn searchViaGetResults error for '{}': {}", query, e.getMessage());
         }
+        return results;
+    }
 
+    private List<Song> searchViaAutocomplete(String query, int limit) {
+        List<Song> results = new ArrayList<>();
+        try {
+            String encoded = URLEncoder.encode(query, StandardCharsets.UTF_8);
+            String url = "https://www.jiosaavn.com/api.php?__call=autocomplete.get&_format=json&_marker=0&cc=in&includeMetaTags=1&query=" + encoded;
+            ResponseEntity<String> res = rest.getForEntity(url, String.class);
+            if (res.getBody() == null) return results;
+
+            String body = res.getBody().trim();
+            if (body.isEmpty() || body.equals("[]") || body.equals("{}")) return results;
+
+            // Handle JSONP wrapping
+            if (body.startsWith("function") || body.startsWith("__")) {
+                int start = body.indexOf('{');
+                if (start >= 0) {
+                    body = body.substring(start);
+                    int end = body.lastIndexOf('}');
+                    if (end >= 0) body = body.substring(0, end + 1);
+                }
+            }
+
+            JsonObject json = JsonParser.parseString(body).getAsJsonObject();
+            JsonArray arr = null;
+            if (json.has("songs") && json.get("songs").isJsonArray()) {
+                arr = json.getAsJsonArray("songs");
+            }
+            if (arr == null || arr.size() == 0) return results;
+
+            int fetched = 0;
+            for (JsonElement e : arr) {
+                if (fetched >= limit) break;
+                Song s = parseSongElement(e);
+                if (s != null && s.getId() != null && !s.getId().isBlank()) {
+                    results.add(s);
+                    fetched++;
+                }
+            }
+            System.out.println("JioSaavn searchViaAutocomplete: total " + results.size() + " songs for '" + query + "'");
+        } catch (Exception e) {
+            log.warn("JioSaavn searchViaAutocomplete error for '{}': {}", query, e.getMessage());
+        }
         return results;
     }
 
@@ -111,10 +183,33 @@ public class JioSaavnService implements MusicProvider {
             }
             String body = res.getBody().trim();
             // Handle empty array/object response
-            if (body.equals("[]") || body.equals("{}")) {
+            if (body.isEmpty() || body.equals("[]") || body.equals("{}")) {
                 log.warn("JioSaavn getSongById returned empty for id: {}", id);
                 return null;
             }
+
+            // Handle JSONP-style wrapping
+            if (body.startsWith("function") || body.startsWith("__")) {
+                int start = body.indexOf('{');
+                if (start >= 0) {
+                    body = body.substring(start);
+                    int end = body.lastIndexOf('}');
+                    if (end >= 0) body = body.substring(0, end + 1);
+                }
+            }
+
+            // Handle array response at top level
+            if (body.startsWith("[")) {
+                JsonArray arr = JsonParser.parseString(body).getAsJsonArray();
+                for (JsonElement elem : arr) {
+                    if (elem.isJsonObject()) {
+                        Song s = parseSongObject(elem.getAsJsonObject());
+                        if (s != null) return s;
+                    }
+                }
+                return null;
+            }
+
             JsonObject json = JsonParser.parseString(body).getAsJsonObject();
 
             // Response format: { "song_id": { ... song details ... } }
@@ -136,7 +231,8 @@ public class JioSaavnService implements MusicProvider {
                 }
             }
 
-            log.warn("Could not parse JioSaavn song details response for id: {}", id);
+            log.warn("Could not parse JioSaavn song details response for id: {} - body: {}", id,
+                body.length() > 200 ? body.substring(0, 200) + "..." : body);
             return null;
         } catch (Exception e) {
             log.warn("JioSaavn getSongById error for '{}': {}", id, e.getMessage());

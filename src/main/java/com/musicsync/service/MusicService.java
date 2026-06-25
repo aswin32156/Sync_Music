@@ -624,12 +624,14 @@ public class MusicService {
     public Map<String, Object> getAvailableSources() {
         boolean youtubeConfigured = youTubeService.isConfigured();
         List<String> sources = new ArrayList<>();
+        sources.add("jiosaavn");
         if (youtubeConfigured) {
             sources.add("youtube");
             sources.add("youtubevideo");
         }
         return Map.of(
             "sources", sources,
+            "jiosaavnConfigured", true,
             "youtubeConfigured", youtubeConfigured,
             "youtubeApiConfigured", youTubeService.isApiConfigured(),
             "spotifyConfigured", false
